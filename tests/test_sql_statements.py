@@ -11,6 +11,52 @@ from databricks.sdk.service.catalog import DataSourceFormat, TableType
 from databricks.sdk.service.sql import ColumnInfo, Disposition, Format
 
 
+@pytest.mark.crud
+@pytest.mark.parametrize(
+    "statement, expected_value, expected_column",
+    [
+        pytest.param("SELECT 1 AS value", 1, "value", id="unquoted-identifier"),
+        pytest.param("SELECT `value` FROM (SELECT 1 AS `value`)", 1, "value", id="backtick-reference"),
+        pytest.param("SELECT '`hello`' AS `value`", "`hello`", "value", id="string-literal"),
+        pytest.param("SELECT 'it''s `quoted`' AS `value`", "it's `quoted`", "value", id="escaped-single-quote"),
+        pytest.param(r"SELECT E'it\'s' AS `value`", "it's", "value", id="escape-string"),
+        pytest.param(r"SELECT e'it\'s `quoted`' AS `value`", "it's `quoted`", "value", id="lowercase-escape-string"),
+        pytest.param(r"SELECT E'path\\' AS `value`", "path\\", "value", id="escape-string-backslash"),
+        pytest.param(r"SELECT 'path\' AS `value`", "path\\", "value", id="ordinary-string-backslash"),
+        pytest.param("SELECT $$it's text$$ AS `value`", "it's text", "value", id="dollar-string"),
+        pytest.param("SELECT $tag$it's text$tag$ AS `value`", "it's text", "value", id="tagged-dollar-string"),
+        pytest.param("SELECT $$`hello`$$ AS `value`", "`hello`", "value", id="dollar-string-backticks"),
+        pytest.param(
+            "SELECT $tag$it's $$ `quoted` $other$ text$tag$ AS `value`",
+            "it's $$ `quoted` $other$ text",
+            "value",
+            id="dollar-string-matching-tag",
+        ),
+        pytest.param("SELECT col$tag$ AS `value` FROM (SELECT 1 AS col$tag$)", 1, "value", id="dollar-in-identifier"),
+        pytest.param('SELECT 1 AS "a`b`c"', 1, "a`b`c", id="double-quoted-identifier"),
+        pytest.param("SELECT 1 AS `a``b`", 1, "a`b", id="escaped-backtick"),
+        pytest.param('SELECT 1 AS `a"b`', 1, 'a"b', id="identifier-with-double-quote"),
+        pytest.param("SELECT 1 -- unmatched ` in comment\n AS `value`", 1, "value", id="line-comment"),
+        pytest.param("SELECT /* unmatched ` in comment */ 1 AS `value`", 1, "value", id="block-comment"),
+        pytest.param(
+            "SELECT /* outer /* inner */ unmatched ` */ 1 AS `value`",
+            1,
+            "value",
+            id="nested-block-comment",
+        ),
+    ],
+)
+def test_backtick_identifier_translation(workspace_client: WorkspaceClient, statement, expected_value, expected_column):
+    """Translate identifier quotes without changing string values or other SQL tokens."""
+    wh = workspace_client.warehouses.create(name="backtick_wh")
+
+    response = workspace_client.statement_execution.execute_statement(warehouse_id=wh.id, statement=statement)
+
+    assert response.status.state.value == "SUCCEEDED"
+    assert response.result.data_array == [[expected_value]]
+    assert response.manifest.schema.columns[0].name == expected_column
+
+
 @pytest.fixture
 def warehouse_with_table(workspace_client: WorkspaceClient):
     """Fixture: warehouse, catalog, schema, and table pre-created."""
