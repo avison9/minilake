@@ -28,12 +28,19 @@ from databricks.sdk.service.sql import ColumnInfo, Disposition, Format
             "value",
             id="escape-string-newline-continuation",
         ),
+        pytest.param(
+            "SELECT E'it' -- continuation\n'\\'s' AS `value`",
+            "it's",
+            "value",
+            id="escape-string-comment-continuation",
+        ),
         pytest.param(r"SELECT 'path\' AS `value`", "path\\", "value", id="ordinary-string-backslash"),
         pytest.param("SELECT $$it's text$$ AS `value`", "it's text", "value", id="dollar-string"),
         pytest.param("SELECT $tag$it's text$tag$ AS `value`", "it's text", "value", id="tagged-dollar-string"),
         pytest.param(
             "SELECT $a\u0301$it's text$a\u0301$ AS `value`", "it's text", "value", id="combining-mark-dollar-tag"
         ),
+        pytest.param("SELECT $a\u00a0$it's text$a\u00a0$ AS `value`", "it's text", "value", id="whitespace-dollar-tag"),
         pytest.param("SELECT $😀$it's text$😀$ AS `value`", "it's text", "value", id="symbol-dollar-tag"),
         pytest.param(
             "SELECT col😀$tag$ AS `value` FROM (SELECT 1 AS col😀$tag$)", 1, "value", id="symbol-in-identifier"

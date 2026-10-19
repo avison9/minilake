@@ -171,6 +171,22 @@ def _scan_quoted_token(sql: str, start: int, quote: str, backslash_escapes: bool
     return i, False
 
 
+def _skip_string_continuation_whitespace(sql: str, start: int) -> Optional[int]:
+    """Return the next position after SQL whitespace/comments containing a newline."""
+    i = start
+    has_newline = False
+    while i < len(sql):
+        if sql[i] in " \t\f\r\n":
+            has_newline = has_newline or sql[i] in "\r\n"
+            i += 1
+        elif sql.startswith("--", i):
+            while i < len(sql) and sql[i] not in "\r\n":
+                i += 1
+        else:
+            break
+    return i if has_newline else None
+
+
 def _dollar_quote_delimiter(sql: str, start: int) -> Optional[str]:
     """Return the dollar-string delimiter at `start`, if there is one.
 
@@ -191,10 +207,8 @@ def _dollar_quote_delimiter(sql: str, start: int) -> Optional[str]:
 
     tag = sql[start + 1 : end]
     if tag and (
-        (tag[0].isascii() and not (tag[0].isalnum() or tag[0] == "_"))
-        or any(
-            char == "$" or char.isspace() or (char.isascii() and not (char.isalnum() or char == "_")) for char in tag
-        )
+        (tag[0].isascii() and not (tag[0].isalpha() or tag[0] == "_"))
+        or any(char.isascii() and not (char.isalnum() or char == "_") for char in tag[1:])
     ):
         return None
     return sql[start : end + 1]
@@ -244,19 +258,14 @@ def _debacktick_identifiers(sql: str) -> str:
             i, closed = _scan_quoted_token(sql, i, quote, backslash_escapes)
             # DuckDB concatenates quoted string segments separated by a newline.
             # If an E-string starts the sequence, backslash escapes also apply to
-            # the following plain segments, so consume them with the same mode.
+            # the following plain segments, including across intervening comments.
             if quote == "'" and backslash_escapes and closed:
                 while True:
-                    segment_end = i
-                    has_newline = False
-                    while i < len(sql) and sql[i].isspace():
-                        has_newline = has_newline or sql[i] in "\r\n"
-                        i += 1
-                    if not has_newline or i >= len(sql) or sql[i] != "'":
-                        i = segment_end
+                    continuation = _skip_string_continuation_whitespace(sql, i)
+                    if continuation is None or continuation >= len(sql) or sql[continuation] != "'":
                         break
 
-                    i, closed = _scan_quoted_token(sql, i, quote, backslash_escapes=True)
+                    i, closed = _scan_quoted_token(sql, continuation, quote, backslash_escapes=True)
                     if not closed:
                         break
             if quote == "`" and closed:
