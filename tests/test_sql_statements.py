@@ -22,9 +22,22 @@ from databricks.sdk.service.sql import ColumnInfo, Disposition, Format
         pytest.param(r"SELECT E'it\'s' AS `value`", "it's", "value", id="escape-string"),
         pytest.param(r"SELECT e'it\'s `quoted`' AS `value`", "it's `quoted`", "value", id="lowercase-escape-string"),
         pytest.param(r"SELECT E'path\\' AS `value`", "path\\", "value", id="escape-string-backslash"),
+        pytest.param(
+            "SELECT E'it'\n'\\'s' AS `value`",
+            "it's",
+            "value",
+            id="escape-string-newline-continuation",
+        ),
         pytest.param(r"SELECT 'path\' AS `value`", "path\\", "value", id="ordinary-string-backslash"),
         pytest.param("SELECT $$it's text$$ AS `value`", "it's text", "value", id="dollar-string"),
         pytest.param("SELECT $tag$it's text$tag$ AS `value`", "it's text", "value", id="tagged-dollar-string"),
+        pytest.param(
+            "SELECT $a\u0301$it's text$a\u0301$ AS `value`", "it's text", "value", id="combining-mark-dollar-tag"
+        ),
+        pytest.param("SELECT $😀$it's text$😀$ AS `value`", "it's text", "value", id="symbol-dollar-tag"),
+        pytest.param(
+            "SELECT col😀$tag$ AS `value` FROM (SELECT 1 AS col😀$tag$)", 1, "value", id="symbol-in-identifier"
+        ),
         pytest.param("SELECT $$`hello`$$ AS `value`", "`hello`", "value", id="dollar-string-backticks"),
         pytest.param(
             "SELECT $tag$it's $$ `quoted` $other$ text$tag$ AS `value`",

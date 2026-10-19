@@ -156,7 +156,48 @@ def _format_value(val: Any) -> Any:
     return str(val)
 
 
-_DOLLAR_QUOTE_RE = re.compile(r"(?<![\w$])\$(?:[^\W\d]\w*)?\$")
+def _scan_quoted_token(sql: str, start: int, quote: str, backslash_escapes: bool = False) -> tuple[int, bool]:
+    """Return the end and closed state of a single/double/backtick quoted token."""
+    i = start + 1
+    while i < len(sql):
+        if backslash_escapes and sql[i] == "\\":
+            i = min(i + 2, len(sql))
+        elif sql[i] != quote:
+            i += 1
+        elif i + 1 < len(sql) and sql[i + 1] == quote:
+            i += 2
+        else:
+            return i + 1, True
+    return i, False
+
+
+def _dollar_quote_delimiter(sql: str, start: int) -> Optional[str]:
+    """Return the dollar-string delimiter at `start`, if there is one.
+
+    DuckDB permits non-ASCII characters, including symbols and combining marks,
+    in dollar tags and unquoted identifiers. Python's word-character class omits some of
+    those characters, so inspect them directly instead of using a regex.
+    """
+    if start and (
+        sql[start - 1].isalnum()
+        or sql[start - 1] in "_$"
+        or (not sql[start - 1].isascii() and not sql[start - 1].isspace())
+    ):
+        return None
+
+    end = sql.find("$", start + 1)
+    if end == -1:
+        return None
+
+    tag = sql[start + 1 : end]
+    if tag and (
+        (tag[0].isascii() and not (tag[0].isalnum() or tag[0] == "_"))
+        or any(
+            char == "$" or char.isspace() or (char.isascii() and not (char.isalnum() or char == "_")) for char in tag
+        )
+    ):
+        return None
+    return sql[start : end + 1]
 
 
 def _debacktick_identifiers(sql: str) -> str:
@@ -185,33 +226,39 @@ def _debacktick_identifiers(sql: str) -> str:
                     i += 2
                 else:
                     i += 1
-        elif sql[i] == "$" and (dollar_quote := _DOLLAR_QUOTE_RE.match(sql, i)):
+        elif sql[i] == "$" and (dollar_quote := _dollar_quote_delimiter(sql, i)):
             # Only the matching tag closes a dollar string; ordinary quotes,
             # comments and other dollar tags inside it are literal text.
-            delimiter = dollar_quote.group()
-            end = sql.find(delimiter, dollar_quote.end())
+            delimiter = dollar_quote
+            end = sql.find(delimiter, i + len(delimiter))
             i = len(sql) if end == -1 else end + len(delimiter)
         elif sql[i] in "'\"`":
             quote = sql[i]
+            start = i
             backslash_escapes = (
                 quote == "'"
                 and start > 0
                 and sql[start - 1] in "eE"
                 and (start == 1 or not (sql[start - 2].isalnum() or sql[start - 2] in "_$"))
             )
-            i += 1
-            closed = False
-            while i < len(sql):
-                if backslash_escapes and sql[i] == "\\":
-                    i += 2
-                elif sql[i] != quote:
-                    i += 1
-                elif i + 1 < len(sql) and sql[i + 1] == quote:
-                    i += 2
-                else:
-                    i += 1
-                    closed = True
-                    break
+            i, closed = _scan_quoted_token(sql, i, quote, backslash_escapes)
+            # DuckDB concatenates quoted string segments separated by a newline.
+            # If an E-string starts the sequence, backslash escapes also apply to
+            # the following plain segments, so consume them with the same mode.
+            if quote == "'" and backslash_escapes and closed:
+                while True:
+                    segment_end = i
+                    has_newline = False
+                    while i < len(sql) and sql[i].isspace():
+                        has_newline = has_newline or sql[i] in "\r\n"
+                        i += 1
+                    if not has_newline or i >= len(sql) or sql[i] != "'":
+                        i = segment_end
+                        break
+
+                    i, closed = _scan_quoted_token(sql, i, quote, backslash_escapes=True)
+                    if not closed:
+                        break
             if quote == "`" and closed:
                 # Databricks escapes a backtick by doubling it; DuckDB instead
                 # needs any embedded double quote doubled in the translated name.
