@@ -171,12 +171,31 @@ def _scan_quoted_token(sql: str, start: int, quote: str, backslash_escapes: bool
     return i, False
 
 
+_DUCKDB_UNICODE_SPACES = frozenset(
+    "\u00a0\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u202f\u205f\u2060\u3000\ufeff"
+)
+
+
+def _is_duckdb_identifier_char(char: str) -> bool:
+    """Match DuckDB's ASCII identifier characters and non-ASCII identifier bytes."""
+    if char in _DUCKDB_UNICODE_SPACES:
+        return False
+    if not char.isascii():
+        return True
+    return char.isalnum() or char in "_$"
+
+
+def _is_duckdb_space(char: str) -> bool:
+    """Match whitespace DuckDB accepts directly or normalizes before lexing."""
+    return char in " \t\f\r\n" or char in _DUCKDB_UNICODE_SPACES
+
+
 def _skip_string_continuation_whitespace(sql: str, start: int) -> Optional[int]:
     """Return the next position after SQL whitespace/comments containing a newline."""
     i = start
     has_newline = False
     while i < len(sql):
-        if sql[i] in " \t\f\r\n":
+        if _is_duckdb_space(sql[i]):
             has_newline = has_newline or sql[i] in "\r\n"
             i += 1
         elif sql.startswith("--", i):
@@ -194,11 +213,7 @@ def _dollar_quote_delimiter(sql: str, start: int) -> Optional[str]:
     in dollar tags and unquoted identifiers. Python's word-character class omits some of
     those characters, so inspect them directly instead of using a regex.
     """
-    if start and (
-        sql[start - 1].isalnum()
-        or sql[start - 1] in "_$"
-        or (not sql[start - 1].isascii() and not sql[start - 1].isspace())
-    ):
+    if start and _is_duckdb_identifier_char(sql[start - 1]):
         return None
 
     end = sql.find("$", start + 1)
@@ -253,7 +268,7 @@ def _debacktick_identifiers(sql: str) -> str:
                 quote == "'"
                 and start > 0
                 and sql[start - 1] in "eE"
-                and (start == 1 or not (sql[start - 2].isalnum() or sql[start - 2] in "_$"))
+                and (start == 1 or not _is_duckdb_identifier_char(sql[start - 2]))
             )
             i, closed = _scan_quoted_token(sql, i, quote, backslash_escapes)
             # DuckDB concatenates quoted string segments separated by a newline.

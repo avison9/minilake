@@ -3,6 +3,7 @@
 import csv
 import io
 import json
+import uuid
 
 import pytest
 import requests
@@ -34,6 +35,12 @@ from databricks.sdk.service.sql import ColumnInfo, Disposition, Format
             "value",
             id="escape-string-comment-continuation",
         ),
+        pytest.param(
+            "SELECT E'it'\u00a0\n'\\'s' AS `value`",
+            "it's",
+            "value",
+            id="escape-string-unicode-space-continuation",
+        ),
         pytest.param(r"SELECT 'path\' AS `value`", "path\\", "value", id="ordinary-string-backslash"),
         pytest.param("SELECT $$it's text$$ AS `value`", "it's text", "value", id="dollar-string"),
         pytest.param("SELECT $tag$it's text$tag$ AS `value`", "it's text", "value", id="tagged-dollar-string"),
@@ -44,6 +51,12 @@ from databricks.sdk.service.sql import ColumnInfo, Disposition, Format
         pytest.param("SELECT $😀$it's text$😀$ AS `value`", "it's text", "value", id="symbol-dollar-tag"),
         pytest.param(
             "SELECT col😀$tag$ AS `value` FROM (SELECT 1 AS col😀$tag$)", 1, "value", id="symbol-in-identifier"
+        ),
+        pytest.param(
+            "SELECT col\u0085$tag$ AS `value` FROM (SELECT 1 AS col\u0085$tag$)",
+            1,
+            "value",
+            id="unicode-identifier-before-dollar",
         ),
         pytest.param("SELECT $$`hello`$$ AS `value`", "`hello`", "value", id="dollar-string-backticks"),
         pytest.param(
@@ -75,6 +88,27 @@ def test_backtick_identifier_translation(workspace_client: WorkspaceClient, stat
     assert response.status.state.value == "SUCCEEDED"
     assert response.result.data_array == [[expected_value]]
     assert response.manifest.schema.columns[0].name == expected_column
+
+
+@pytest.mark.crud
+def test_backtick_identifier_after_unicode_typed_literal(workspace_client: WorkspaceClient):
+    """A combining mark in a type name must not make its trailing e an E-string prefix."""
+    wh = workspace_client.warehouses.create(name="unicode_type_wh")
+    type_name = f"enum_{uuid.uuid4().hex}\u0301e"
+    setup = workspace_client.statement_execution.execute_statement(
+        warehouse_id=wh.id,
+        statement=f"CREATE TYPE {type_name} AS ENUM ('path\\')",
+    )
+    assert setup.status.state.value == "SUCCEEDED"
+
+    response = workspace_client.statement_execution.execute_statement(
+        warehouse_id=wh.id,
+        statement=f"SELECT {type_name}'path\\' AS `value`",
+    )
+
+    assert response.status.state.value == "SUCCEEDED"
+    assert response.result.data_array == [["path\\"]]
+    assert response.manifest.schema.columns[0].name == "value"
 
 
 @pytest.fixture
