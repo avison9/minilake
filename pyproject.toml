@@ -36,7 +36,10 @@ dependencies = [
     # and breaks with it.
     "pydantic>=2.11",
     "pydantic-settings>=2.3",
-    "duckdb>=1.0",
+    # Capped below 2.0: DuckDB 2 stopped carrying E-string escape semantics across
+    # implicit string continuation (E'a'\n'\'b' is now a parse error), which the backtick
+    # rewriter in sql_statements.py mirrors from 1.x. Lift with that tokenizer change.
+    "duckdb>=1.0,<2",
     # Runtime, not just test: the JupyterLab reverse proxy (notebook.py) and the MCP
     # ASGI client (mcp/client.py) both import it, and app.py imports notebook.py
     # unconditionally. Without it a plain `pip install minilake` crashes on startup.
@@ -62,22 +65,24 @@ Changelog = "https://github.com/dmux/minilake/releases"
 # MCP server (exposes minilake's capabilities to LLM agents at /mcp). Optional so the
 # base install stays free of the SDK's transitive deps (jsonschema, pyjwt[crypto],
 # sse-starlette, ...). Pinned to the 1.x line: 2.0 renames FastMCP -> MCPServer and
-# removes mcp.server.fastmcp outright, so it is a rewrite, not a bump.
-mcp = ["mcp>=1.29,<2"]
+# removes mcp.server.fastmcp outright, so it is a rewrite, not a bump. The 1.30 floor
+# fixes unbounded session accumulation in the StreamableHTTP transport we serve at /mcp.
+mcp = ["mcp>=1.30,<2"]
 
 # Embedded JupyterLab, proxied at /jupyter and framed by the UI's Notebooks page.
 # Optional so a base install stays slim: this pulls in the whole Jupyter stack
 # (jupyter-server, ipykernel, nbformat, ...). No pyspark here on purpose — notebooks
 # reach real Spark through the Jobs API, in the same sibling containers a job uses,
 # so the image never carries a second Spark.
-notebook = ["jupyterlab>=4.2,<5", "databricks-sdk>=0.40"]
+# The 4.6.4 floor carries the XSS and argument-injection fixes for the 4.6 line.
+notebook = ["jupyterlab>=4.6.4,<5", "databricks-sdk>=0.40"]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-xdist>=3.6",
     "pytest-asyncio>=0.24",
-    "mcp>=1.29,<2",
+    "mcp>=1.30,<2",
     "databricks-sdk>=0.40",
     "ruff>=0.6",
     "pre-commit>=3.8",

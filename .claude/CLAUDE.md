@@ -224,7 +224,7 @@ Optional layer (`MINILAKE_MCP=1`, extra `minilake[mcp]`) exposing minilake to LL
   `_TOOL_MODULES` in `mcp/server.py` keyed by its owning service, so `MINILAKE_SERVICES`
   filtering is honoured automatically.
 - **SDK names stay in `server.py` and `client.py` only.** Tool modules touch `@mcp.tool()`
-  and `MinilakeClient`, nothing else. We're pinned to `mcp>=1.29,<2`; version 2.0 renames
+  and `MinilakeClient`, nothing else. We're pinned to `mcp>=1.30,<2`; version 2.0 renames
   `FastMCP` to `MCPServer` and drops `mcp.server.fastmcp`, and this boundary keeps that
   migration to two files.
 - **Tools call minilake over its own ASGI stack** (`httpx.ASGITransport`), never by
