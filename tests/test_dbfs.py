@@ -10,6 +10,7 @@ import base64
 
 import pytest
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import DatabricksError
 
 SAMPLE = b"minilake dbfs real content\n"
 
@@ -83,6 +84,37 @@ def test_dbfs_move(workspace_client: WorkspaceClient):
         workspace_client.dbfs.get_status("/test_move_src.txt")
 
     print("✓ DBFS move renames real files")
+
+
+@pytest.mark.error
+def test_dbfs_move_rejects_existing_file_destination(workspace_client: WorkspaceClient):
+    """Moving onto a file must preserve both files and report a conflict."""
+    workspace_client.dbfs.put("/move_existing_src.txt", contents=_b64(b"new"), overwrite=True)
+    workspace_client.dbfs.put("/move_existing_dst.txt", contents=_b64(b"original"), overwrite=True)
+
+    with pytest.raises(DatabricksError) as exc:
+        workspace_client.dbfs.move("/move_existing_src.txt", "/move_existing_dst.txt")
+
+    assert exc.value.error_code == "RESOURCE_ALREADY_EXISTS"
+    assert base64.b64decode(workspace_client.dbfs.read("/move_existing_src.txt").data) == b"new"
+    assert base64.b64decode(workspace_client.dbfs.read("/move_existing_dst.txt").data) == b"original"
+
+
+@pytest.mark.error
+def test_dbfs_move_rejects_existing_empty_directory_destination(workspace_client: WorkspaceClient):
+    """Moving a directory onto an existing empty directory must not replace it."""
+    workspace_client.dbfs.mkdirs("/move_dir_src")
+    workspace_client.dbfs.mkdirs("/move_dir_dst")
+    workspace_client.dbfs.put("/move_dir_src/child.txt", contents=_b64(b"source"), overwrite=True)
+
+    with pytest.raises(DatabricksError) as exc:
+        workspace_client.dbfs.move("/move_dir_src", "/move_dir_dst")
+
+    assert exc.value.error_code == "RESOURCE_ALREADY_EXISTS"
+    assert workspace_client.dbfs.get_status("/move_dir_src").is_dir
+    assert base64.b64decode(workspace_client.dbfs.read("/move_dir_src/child.txt").data) == b"source"
+    assert workspace_client.dbfs.get_status("/move_dir_dst").is_dir
+    assert list(workspace_client.dbfs.list("/move_dir_dst")) == []
 
 
 @pytest.mark.error
