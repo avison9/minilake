@@ -109,6 +109,47 @@ def test_catalog_delete_without_force_preserves_sql_created_table(catalog, works
         workspace_client.warehouses.delete(id=warehouse.id)
 
 
+@pytest.mark.serial
+@pytest.mark.workflow
+def test_catalog_delete_rejects_replaced_attachment(catalog, workspace_client: WorkspaceClient):
+    """A same-name attachment to another database must not let deletion unlink this catalog."""
+    table_name = f"preserve_{uuid4().hex[:8]}"
+    warehouse = workspace_client.warehouses.create(name=f"delete_wh_{uuid4().hex[:6]}", cluster_size="Small")
+
+    def execute(statement):
+        return workspace_client.statement_execution.execute_statement(
+            warehouse_id=warehouse.id,
+            statement=statement,
+        )
+
+    try:
+        execute(f'CREATE TABLE "{catalog.name}"."default"."{table_name}" AS SELECT 42 AS id')
+        execute(f'DETACH "{catalog.name}"')
+        execute(f"ATTACH ':memory:' AS \"{catalog.name}\"")
+
+        with pytest.raises(DatabricksError):
+            workspace_client.catalogs.delete(name=catalog.name)
+
+        # Once the conflicting alias is removed, deletion must attach and inspect the
+        # original file, proving that the failed request left its table intact.
+        execute(f'DETACH "{catalog.name}"')
+        with pytest.raises(DatabricksError, match="not empty"):
+            workspace_client.catalogs.delete(name=catalog.name)
+
+        result = execute(f'SELECT id FROM "{catalog.name}"."default"."{table_name}"')
+        assert result.result.data_array == [[42]]
+    finally:
+        try:
+            execute(f'DETACH "{catalog.name}"')
+        except Exception:
+            pass
+        try:
+            workspace_client.catalogs.delete(name=catalog.name, force=True)
+        except Exception:
+            pass
+        workspace_client.warehouses.delete(id=warehouse.id)
+
+
 @pytest.mark.error
 def test_catalog_create_duplicate_fails(workspace_client: WorkspaceClient):
     """Test: Creating duplicate catalog raises error."""

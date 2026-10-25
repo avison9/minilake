@@ -142,13 +142,22 @@ class DuckDBPool:
         """
         conn = await self.get_uc_connection()
         async with self._uc_lock:
-            if can_detach is not None and not can_detach(conn):
-                return False
-            is_attached = conn.execute(
-                "SELECT 1 FROM duckdb_databases() WHERE database_name = ?",
+            attachment = conn.execute(
+                "SELECT path FROM duckdb_databases() WHERE database_name = ?",
                 [catalog_name],
             ).fetchone()
-            if is_attached:
+            expected_path = self._catalog_db_path(catalog_name).resolve()
+            if can_detach is not None and attachment is None:
+                raise RuntimeError(f"Catalog '{catalog_name}' is not attached for emptiness inspection")
+            if attachment is not None:
+                attached_path = attachment[0]
+                if not attached_path or Path(attached_path).resolve() != expected_path:
+                    raise RuntimeError(
+                        f"Catalog '{catalog_name}' is attached to '{attached_path}', not its backing file '{expected_path}'"
+                    )
+            if can_detach is not None and not can_detach(conn):
+                return False
+            if attachment:
                 conn.execute(f'DETACH "{catalog_name}"')
         path = self._catalog_db_path(catalog_name)
         path.unlink(missing_ok=True)
