@@ -8,6 +8,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-feature design rationale and known limitations live in [FEATURES.md](FEATURES.md);
 this file records what changed between releases.
 
+## [1.9.0] — 2026-10-24
+
+Hardens the backtick-identifier rewriter that lets Databricks-style `` `name` `` quoting
+run on DuckDB, and clears a fresh round of Dependabot alerts.
+
+Thanks to [@eddiethedean](https://github.com/eddiethedean) (Odos Matthews) for the SQL
+fixes in this release ([#25](https://github.com/dmux/minilake/pull/25)).
+
+### Fixed
+
+- **Backtick rewriting no longer corrupts string literals, comments or dollar-quoted
+  tags.** When translating Databricks `` `col` `` identifiers to DuckDB's `"col"`, the
+  rewriter now skips over single/double/E-string literals, `--` and `/* */` comments
+  (including continuations) and `$tag$ ... $tag$` blocks, matching DuckDB's own Unicode
+  token boundaries instead of mangling text that merely contained a backtick.
+
+### Performance
+
+- **Statements with no backtick are passed through untouched**, skipping the rewrite
+  pass entirely.
+
+### Security
+
+- **Dependabot alerts cleared** via transitive dependency bumps
+  ([#27](https://github.com/dmux/minilake/pull/27)).
+
 ## [1.8.0] — 2026-09-29
 
 Clears every open Dependabot alert. The change is only in `ui/pnpm-lock.yaml`: each
