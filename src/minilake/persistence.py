@@ -8,8 +8,8 @@ on shutdown (if MINILAKE_PERSIST=1) and reloaded on startup.
 import json
 import logging
 import os
-from pathlib import Path
 import tempfile
+from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
