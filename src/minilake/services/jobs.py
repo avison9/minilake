@@ -838,9 +838,18 @@ def get_state() -> Dict[str, Any]:
 
 
 def restore_state(data: Dict[str, Any]) -> None:
-    """Restore state from snapshot."""
+    """Restore state from snapshot, including registries keyed by numeric IDs.
+
+    JSON object keys are always strings. The live jobs state uses integer keys
+    for these registries, so normalize them before serving requests that look
+    up a job, run, or task output by its numeric ID.
+    """
     global _state
     _state.update(data)
+    for registry_name in ("jobs", "runs", "task_outputs"):
+        registry = _state.get(registry_name)
+        if registry is not None:
+            _state[registry_name] = {int(key): value for key, value in registry.items()}
 
 
 async def reset() -> None:
