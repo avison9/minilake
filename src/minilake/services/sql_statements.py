@@ -676,18 +676,21 @@ async def _apply_default_namespace(conn, catalog: Optional[str], schema_name: Op
     """Point the connection at `catalog[.schema]`, returning what to restore afterwards."""
     if not catalog and not schema_name:
         return None
+    current = conn.execute("SELECT current_catalog(), current_schema()").fetchone()
+    target = f'"{catalog}"' if catalog else f'"{current[0]}"'
+    if schema_name:
+        target = f'{target}."{schema_name}"'
     try:
-        current = conn.execute("SELECT current_catalog(), current_schema()").fetchone()
-        target = f'"{catalog}"' if catalog else f'"{current[0]}"'
-        if schema_name:
-            target = f'{target}."{schema_name}"'
         conn.execute(f"USE {target}")
-        return current
     except Exception as e:
-        # A bad default is the caller's problem to see in the statement error, not a
-        # reason to fail before the statement even runs.
         logger.warning(f"Could not set default namespace {catalog}.{schema_name}: {e}")
-        return None
+        _restore_default_namespace(conn, current)
+        raise DatabricksError(
+            error_code="INVALID_PARAMETER_VALUE",
+            message=f"Could not set default namespace {catalog}.{schema_name}: {e}",
+            status_code=400,
+        ) from e
+    return current
 
 
 def _restore_default_namespace(conn, previous) -> None:
