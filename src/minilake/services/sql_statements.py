@@ -344,7 +344,18 @@ def _sql_token_spans(sql: str) -> List[tuple[Optional[str], int, int, str]]:
                 and sql[start - 1] in "eE"
                 and (start == 1 or not _is_duckdb_identifier_char(sql[start - 2]))
             )
-            i, _ = _scan_quoted_token(sql, i, quote, backslash_escapes)
+            i, closed = _scan_quoted_token(sql, i, quote, backslash_escapes)
+            # DuckDB concatenates quoted string segments separated by a newline.
+            # If the first segment is an E-string, backslash escapes continue in
+            # the following plain segments, including across comments.
+            if quote == "'" and backslash_escapes and closed:
+                while True:
+                    continuation = _skip_string_continuation_whitespace(sql, i)
+                    if continuation is None or continuation >= len(sql) or sql[continuation] != "'":
+                        break
+                    i, closed = _scan_quoted_token(sql, continuation, quote, backslash_escapes=True)
+                    if not closed:
+                        break
             kind = "identifier" if quote in ('"', "`") else "string"
             tokens.append((None, start, i, kind))
         elif _is_duckdb_identifier_char(sql[i]):
@@ -379,6 +390,10 @@ def _strip_databricks_ddl_tail(statement: str) -> str:
     # closing parenthesis so function calls in CTAS queries cannot look like DDL.
     opening = next((j for j in range(i + 1, len(tokens)) if tokens[j][0] == "("), None)
     if opening is None:
+        return statement
+    # CTAS queries may contain function calls or subqueries followed by DuckDB
+    # clauses such as `USING SAMPLE`; their parentheses are not a column list.
+    if any(token[0] == "AS" for token in tokens[i + 1 : opening]):
         return statement
     depth = 0
     closing = None
