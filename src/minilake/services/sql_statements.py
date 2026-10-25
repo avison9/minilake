@@ -306,6 +306,7 @@ def _debacktick_identifiers(sql: str) -> str:
 # manages storage natively, with no pluggable format) doesn't understand.
 # Requires `\w+` right after USING so `JOIN ... USING (col)` is untouched.
 _CREATE_TABLE_USING_CLAUSE_RE = re.compile(r"\)\s*USING\s+\w+.*\Z", re.IGNORECASE | re.DOTALL)
+_CREATE_TABLE_START_RE = re.compile(r"^\s*CREATE\s+TABLE\b", re.IGNORECASE)
 
 
 def _strip_databricks_ddl_clauses(sql: str) -> str:
@@ -317,6 +318,12 @@ def _strip_databricks_ddl_clauses(sql: str) -> str:
     `USING DELTA ... LOCATION` is handled before this, by `_classify_create_external`
     — stripping it here would silently turn an external table into a plain DuckDB one.
     """
+    # The tail-shaped pattern is intentionally small, but its match can also
+    # occur in comments on unrelated statements (for example, a DELETE comment
+    # followed by WHERE). Keep the rewrite on the CREATE TABLE path only.
+    if not _CREATE_TABLE_START_RE.match(sql):
+        return sql
+
     return _CREATE_TABLE_USING_CLAUSE_RE.sub(")", sql)
 
 
