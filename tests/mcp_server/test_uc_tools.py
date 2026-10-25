@@ -190,6 +190,37 @@ async def test_seed_table_recreate_invalid_target_preserves_sql_created_table(mc
     assert result["rows"] == [[41], [42]]
 
 
+async def test_seed_table_recreate_trailing_newline_preserves_sql_created_table(mcp):
+    """Reject a trailing newline before recreate can drop a SQL-created table."""
+    full_name = "seednewline.s.orders\n"
+    await mcp.call("setup_fixture", {"catalog": "seednewline", "schema": "s"})
+    await mcp.call(
+        "run_sql",
+        {"statement": 'CREATE TABLE "seednewline"."s"."orders\n" (id INTEGER)'},
+    )
+    await mcp.call(
+        "run_sql",
+        {"statement": 'INSERT INTO "seednewline"."s"."orders\n" VALUES (41), (42)'},
+    )
+
+    error = await mcp.call_expecting_error(
+        "seed_table",
+        {
+            "full_name": full_name,
+            "columns": [{"name": "id", "type_text": "INTEGER"}],
+            "rows": [[43]],
+            "recreate": True,
+        },
+    )
+
+    assert "invalid table name" in error.lower()
+    result = await mcp.call(
+        "run_sql",
+        {"statement": 'SELECT id FROM "seednewline"."s"."orders\n" ORDER BY id'},
+    )
+    assert result["rows"] == [[41], [42]]
+
+
 async def test_seed_table_accepts_databricks_types(mcp):
     """Databricks type names are what a model will reach for first."""
     result = await mcp.call(
