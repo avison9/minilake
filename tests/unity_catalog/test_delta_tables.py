@@ -125,7 +125,7 @@ def test_create_table_using_delta_location_with_comment_registers_external(
     result = workspace_client.statement_execution.execute_statement(
         warehouse_id=warehouse.id,
         statement=(
-            f"CREATE TABLE {cat.name}.{schema.name}.{table_name} (id BIGINT) "
+            f"CREATE TABLE {cat.name}./* name separator */{schema.name}.{table_name} (id BIGINT) "
             f"/* format metadata */ USING DELTA LOCATION '{storage_location}'"
         ),
     )

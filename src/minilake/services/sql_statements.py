@@ -456,7 +456,7 @@ def _strip_databricks_ddl_clauses(sql: str) -> str:
 # `CREATE TABLE cat.sch.tbl (cols) USING <format> [LOCATION '...'] [TBLPROPERTIES ...]`
 _CREATE_USING_RE = re.compile(
     r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
-    r"(?P<name>[\w.\"`]+(?:\s+\.\s+[\w.\"`]+)*)\s*"
+    r"(?P<name>[\w.\"`]+(?:\s*\.\s*[\w.\"`]+)*)\s*"
     r"\((?P<columns>.*)\)\s*"
     r"USING\s+(?P<format>\w+)"
     r"(?P<tail>.*)\Z",
