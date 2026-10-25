@@ -684,8 +684,21 @@ async def _execute_delta_write(
 
 async def _apply_default_namespace(conn, catalog: Optional[str], schema_name: Optional[str]):
     """Point the connection at `catalog[.schema]`, returning what to restore afterwards."""
-    if not catalog and not schema_name:
+    if catalog is None and schema_name is None:
         return None
+
+    if catalog == "":
+        raise DatabricksError(
+            error_code="INVALID_PARAMETER_VALUE",
+            message="Catalog cannot be empty",
+            status_code=400,
+        )
+    if schema_name == "":
+        raise DatabricksError(
+            error_code="INVALID_PARAMETER_VALUE",
+            message="Schema cannot be empty",
+            status_code=400,
+        )
 
     if catalog:
         from minilake.services import unity_catalog
@@ -701,9 +714,12 @@ async def _apply_default_namespace(conn, catalog: Optional[str], schema_name: Op
             )
 
     current = conn.execute("SELECT current_catalog(), current_schema()").fetchone()
-    target = f'"{catalog}"' if catalog else f'"{current[0]}"'
-    if schema_name:
-        target = f'{target}."{schema_name}"'
+    target_catalog = catalog if catalog is not None else current[0]
+    # A catalog-only request keeps DuckDB's established `main` schema default,
+    # but names it explicitly so DuckDB cannot mistake the catalog for a schema
+    # in the connection's previous catalog.
+    target_schema = schema_name if schema_name is not None else ("main" if catalog is not None else current[1])
+    target = f'"{target_catalog}"."{target_schema}"'
     try:
         conn.execute(f"USE {target}")
     except Exception as e:
@@ -750,7 +766,7 @@ async def _register_external_delta(
 
 async def _validate_special_statement_namespace(catalog: Optional[str], schema_name: Optional[str]) -> None:
     """Validate an explicit statement namespace before special SQL paths write data."""
-    if not catalog and not schema_name:
+    if catalog is None and schema_name is None:
         return
 
     pool = get_duckdb_pool()

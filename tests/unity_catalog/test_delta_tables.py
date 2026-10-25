@@ -258,6 +258,8 @@ def test_insert_into_external_delta_table_with_explicit_columns(
     [
         pytest.param("missing_catalog", "missing_schema", id="missing-catalog-and-schema"),
         pytest.param("main", None, id="missing-catalog-matches-default-schema"),
+        pytest.param("", None, id="empty-catalog"),
+        pytest.param(None, "", id="empty-schema"),
     ],
 )
 def test_external_delta_write_rejects_invalid_namespace(
