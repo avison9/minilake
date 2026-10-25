@@ -159,6 +159,37 @@ async def test_seed_table_failed_replacement_preserves_existing_table(
     assert [column["name"] for column in table["columns"]] == ["id"]
 
 
+async def test_seed_table_recreate_invalid_target_preserves_sql_created_table(mcp):
+    """Reject a UC-invalid target name before recreate drops a SQL-created table."""
+    full_name = "seedinvalidname.s.daily-sales"
+    await mcp.call("setup_fixture", {"catalog": "seedinvalidname", "schema": "s"})
+    await mcp.call(
+        "run_sql",
+        {"statement": 'CREATE TABLE "seedinvalidname"."s"."daily-sales" (id INTEGER)'},
+    )
+    await mcp.call(
+        "run_sql",
+        {"statement": 'INSERT INTO "seedinvalidname"."s"."daily-sales" VALUES (41), (42)'},
+    )
+
+    error = await mcp.call_expecting_error(
+        "seed_table",
+        {
+            "full_name": full_name,
+            "columns": [{"name": "id", "type_text": "INTEGER"}],
+            "rows": [[43]],
+            "recreate": True,
+        },
+    )
+
+    assert "invalid table name 'daily-sales'" in error.lower()
+    result = await mcp.call(
+        "run_sql",
+        {"statement": 'SELECT id FROM "seedinvalidname"."s"."daily-sales" ORDER BY id'},
+    )
+    assert result["rows"] == [[41], [42]]
+
+
 async def test_seed_table_accepts_databricks_types(mcp):
     """Databricks type names are what a model will reach for first."""
     result = await mcp.call(

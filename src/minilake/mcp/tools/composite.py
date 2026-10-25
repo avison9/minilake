@@ -9,8 +9,10 @@ from uuid import uuid4
 
 from mcp.server.fastmcp.exceptions import ToolError
 
+from minilake.errors import DatabricksError
 from minilake.mcp.client import MinilakeClient
 from minilake.mcp.tools.sql import ensure_warehouse
+from minilake.uc_types import validate_identifier
 
 _UC = "/api/2.1/unity-catalog"
 _SQL = "/api/2.0/sql"
@@ -89,6 +91,14 @@ def register(mcp: Any, client: MinilakeClient) -> None:
         await _ensure_schema(client, catalog, schema)
 
         if recreate:
+            # The staging table has a generated, valid name, so its creation cannot
+            # validate the requested target name. Validate that name before dropping
+            # the existing table; SQL-created tables can have names UC rejects.
+            try:
+                validate_identifier(table, "table")
+            except DatabricksError as e:
+                raise ToolError(f"{e.error_code}: {e.message}") from e
+
             # Validate both the replacement schema and every value before dropping the
             # current table. Creating/populating a separate managed table exercises the
             # same UC type validation and DuckDB conversions without risking user data.
