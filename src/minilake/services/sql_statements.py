@@ -301,30 +301,121 @@ def _debacktick_identifiers(sql: str) -> str:
     return "".join(parts)
 
 
-# Matches the tail of a Databricks `CREATE TABLE ... (cols) USING DELTA
-# [LOCATION ...] [TBLPROPERTIES ...] ...` statement — clauses DuckDB (which
-# manages storage natively, with no pluggable format) doesn't understand.
-# Requires `\w+` right after USING so `JOIN ... USING (col)` is untouched.
-_CREATE_TABLE_USING_CLAUSE_RE = re.compile(r"\)\s*USING\s+\w+.*\Z", re.IGNORECASE | re.DOTALL)
-_CREATE_TABLE_START_RE = re.compile(r"^\s*CREATE\s+TABLE\b", re.IGNORECASE)
+def _sql_token_spans(sql: str) -> List[tuple[Optional[str], int, int, str]]:
+    """Return SQL token spans, skipping whitespace and comments.
+
+    Quoted strings and identifiers are emitted as opaque tokens so punctuation or
+    keywords inside them cannot be mistaken for syntax by the DDL compatibility pass.
+    """
+    tokens = []
+    i = 0
+    while i < len(sql):
+        if _is_duckdb_space(sql[i]):
+            i += 1
+            continue
+        if sql.startswith("--", i):
+            while i < len(sql) and sql[i] not in "\r\n":
+                i += 1
+            continue
+        if sql.startswith("/*", i):
+            depth = 1
+            i += 2
+            while i < len(sql) and depth:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            continue
+
+        start = i
+        if sql[i] == "$" and (delimiter := _dollar_quote_delimiter(sql, i)):
+            end = sql.find(delimiter, i + len(delimiter))
+            i = len(sql) if end == -1 else end + len(delimiter)
+            tokens.append((None, start, i, "string"))
+        elif sql[i] in "'\"`":
+            quote = sql[i]
+            backslash_escapes = (
+                quote == "'"
+                and start > 0
+                and sql[start - 1] in "eE"
+                and (start == 1 or not _is_duckdb_identifier_char(sql[start - 2]))
+            )
+            i, _ = _scan_quoted_token(sql, i, quote, backslash_escapes)
+            kind = "identifier" if quote in ('"', "`") else "string"
+            tokens.append((None, start, i, kind))
+        elif _is_duckdb_identifier_char(sql[i]):
+            i += 1
+            while i < len(sql) and _is_duckdb_identifier_char(sql[i]):
+                i += 1
+            tokens.append((sql[start:i].upper(), start, i, "word"))
+        else:
+            i += 1
+            tokens.append((sql[start:i], start, i, "punctuation"))
+    return tokens
+
+
+def _strip_databricks_ddl_tail(statement: str) -> str:
+    """Strip a real trailing `USING <format>` clause from one CREATE TABLE."""
+    tokens = _sql_token_spans(statement)
+    if len(tokens) < 4 or tokens[0][0] != "CREATE":
+        return statement
+
+    i = 1
+    if i < len(tokens) and tokens[i][0] == "OR":
+        i += 1
+        if i >= len(tokens) or tokens[i][0] != "REPLACE":
+            return statement
+        i += 1
+    if i < len(tokens) and tokens[i][0] in {"TEMP", "TEMPORARY"}:
+        i += 1
+    if i >= len(tokens) or tokens[i][0] != "TABLE":
+        return statement
+
+    # The first parenthesis after the table name opens its column list. Match its
+    # closing parenthesis so function calls in CTAS queries cannot look like DDL.
+    opening = next((j for j in range(i + 1, len(tokens)) if tokens[j][0] == "("), None)
+    if opening is None:
+        return statement
+    depth = 0
+    closing = None
+    for j in range(opening, len(tokens)):
+        if tokens[j][0] == "(":
+            depth += 1
+        elif tokens[j][0] == ")":
+            depth -= 1
+            if depth == 0:
+                closing = j
+                break
+    if closing is None or closing + 2 >= len(tokens):
+        return statement
+
+    using, format_token = tokens[closing + 1], tokens[closing + 2]
+    if using[0] != "USING" or format_token[3] != "word":
+        return statement
+
+    return statement[: tokens[closing][2]]
 
 
 def _strip_databricks_ddl_clauses(sql: str) -> str:
-    """Drop Databricks-only `CREATE TABLE` clauses (`USING <format>` and
-    everything after it, e.g. `LOCATION`, `TBLPROPERTIES`) that the
-    Databricks Terraform provider's generated DDL includes but DuckDB's
-    parser rejects.
+    """Drop Databricks-only table-format tails without changing other SQL.
 
-    `USING DELTA ... LOCATION` is handled before this, by `_classify_create_external`
-    — stripping it here would silently turn an external table into a plain DuckDB one.
+    `USING DELTA ... LOCATION` is handled before this, by `_classify_create_external`.
+    Only an actual `USING <format>` after a CREATE TABLE column list is stripped;
+    matches inside comments, strings, CTAS queries, or later statements are ignored.
     """
-    # The tail-shaped pattern is intentionally small, but its match can also
-    # occur in comments on unrelated statements (for example, a DELETE comment
-    # followed by WHERE). Keep the rewrite on the CREATE TABLE path only.
-    if not _CREATE_TABLE_START_RE.match(sql):
-        return sql
-
-    return _CREATE_TABLE_USING_CLAUSE_RE.sub(")", sql)
+    parts = []
+    cursor = 0
+    for token, start, end, kind in _sql_token_spans(sql):
+        if kind == "punctuation" and token == ";":
+            parts.append(_strip_databricks_ddl_tail(sql[cursor:start]))
+            parts.append(sql[start:end])
+            cursor = end
+    parts.append(_strip_databricks_ddl_tail(sql[cursor:]))
+    return "".join(parts)
 
 
 # `CREATE TABLE cat.sch.tbl (cols) USING <format> [LOCATION '...'] [TBLPROPERTIES ...]`
