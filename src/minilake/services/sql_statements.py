@@ -432,6 +432,13 @@ def _strip_databricks_ddl_tail(statement: str) -> str:
     if using[0] != "USING" or format_token[3] != "word":
         return statement
 
+    # External-table declarations must be registered before their format tail is
+    # removed. If the classifier above cannot handle a valid variant (for example
+    # CREATE OR REPLACE or a quoted name), leave LOCATION in place so DuckDB rejects
+    # the unsupported statement instead of silently replacing a table without its data.
+    if any(token[0] == "LOCATION" for token in tokens[closing + 3 :]):
+        return statement
+
     return statement[: tokens[closing][2]]
 
 
