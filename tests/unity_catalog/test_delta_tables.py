@@ -111,6 +111,39 @@ def test_create_table_using_delta_location_registers_external(
 
 
 @pytest.mark.workflow
+def test_create_table_using_delta_location_with_comment_registers_external(
+    delta_catalog_and_schema, workspace_client: WorkspaceClient
+):
+    """A comment before USING DELTA must not turn an external table into a managed one."""
+    cat, schema = delta_catalog_and_schema
+    table_name = f"ddl_comment_{uuid4().hex[:6]}"
+    storage_location = f"/data/delta/{cat.name}/{schema.name}/{table_name}"
+
+    write_deltalake(storage_location, pd.DataFrame({"id": [7, 8]}), mode="overwrite")
+
+    warehouse = workspace_client.warehouses.create(name=f"ddl_comment_wh_{uuid4().hex[:6]}")
+    result = workspace_client.statement_execution.execute_statement(
+        warehouse_id=warehouse.id,
+        statement=(
+            f"CREATE TABLE {cat.name}.{schema.name}.{table_name} (id BIGINT) "
+            f"/* format metadata */ USING DELTA LOCATION '{storage_location}'"
+        ),
+    )
+    assert result.status.state.value == "SUCCEEDED"
+
+    table = workspace_client.tables.get(full_name=f"{cat.name}.{schema.name}.{table_name}")
+    assert table.table_type.value == "EXTERNAL"
+    assert table.storage_location == storage_location
+
+    rows = workspace_client.statement_execution.execute_statement(
+        warehouse_id=warehouse.id,
+        statement=f"SELECT id FROM {cat.name}.{schema.name}.{table_name} ORDER BY id",
+    )
+    assert rows.status.state.value == "SUCCEEDED"
+    assert rows.result.data_array == [[7], [8]]
+
+
+@pytest.mark.workflow
 def test_external_delta_table_read_via_sql(delta_catalog_and_schema, workspace_client: WorkspaceClient):
     """Register an EXTERNAL Delta table, write real Delta data, query it via SQL."""
     cat, schema = delta_catalog_and_schema

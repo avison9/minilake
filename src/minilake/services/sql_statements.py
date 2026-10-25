@@ -301,7 +301,7 @@ def _debacktick_identifiers(sql: str) -> str:
     return "".join(parts)
 
 
-def _sql_token_spans(sql: str) -> List[tuple[Optional[str], int, int, str]]:
+def _sql_token_spans(sql: str, include_comments: bool = False) -> List[tuple[Optional[str], int, int, str]]:
     """Return SQL token spans, skipping whitespace and comments.
 
     Quoted strings and identifiers are emitted as opaque tokens so punctuation or
@@ -314,10 +314,14 @@ def _sql_token_spans(sql: str) -> List[tuple[Optional[str], int, int, str]]:
             i += 1
             continue
         if sql.startswith("--", i):
+            start = i
             while i < len(sql) and sql[i] not in "\r\n":
                 i += 1
+            if include_comments:
+                tokens.append((None, start, i, "comment"))
             continue
         if sql.startswith("/*", i):
+            start = i
             depth = 1
             i += 2
             while i < len(sql) and depth:
@@ -329,6 +333,8 @@ def _sql_token_spans(sql: str) -> List[tuple[Optional[str], int, int, str]]:
                     i += 2
                 else:
                     i += 1
+            if include_comments:
+                tokens.append((None, start, i, "comment"))
             continue
 
         start = i
@@ -367,6 +373,20 @@ def _sql_token_spans(sql: str) -> List[tuple[Optional[str], int, int, str]]:
             i += 1
             tokens.append((sql[start:i], start, i, "punctuation"))
     return tokens
+
+
+def _sql_without_comments(sql: str) -> str:
+    """Replace SQL comments with whitespace without changing quoted text."""
+    parts = []
+    cursor = 0
+    for _token, start, end, kind in _sql_token_spans(sql, include_comments=True):
+        if kind != "comment":
+            continue
+        parts.append(sql[cursor:start])
+        parts.append("".join("\n" if char == "\n" else "\r" if char == "\r" else " " for char in sql[start:end]))
+        cursor = end
+    parts.append(sql[cursor:])
+    return "".join(parts)
 
 
 def _strip_databricks_ddl_tail(statement: str) -> str:
@@ -436,7 +456,7 @@ def _strip_databricks_ddl_clauses(sql: str) -> str:
 # `CREATE TABLE cat.sch.tbl (cols) USING <format> [LOCATION '...'] [TBLPROPERTIES ...]`
 _CREATE_USING_RE = re.compile(
     r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
-    r"(?P<name>[\w.\"`]+)\s*"
+    r"(?P<name>[\w.\"`]+(?:\s+\.\s+[\w.\"`]+)*)\s*"
     r"\((?P<columns>.*)\)\s*"
     r"USING\s+(?P<format>\w+)"
     r"(?P<tail>.*)\Z",
@@ -454,7 +474,11 @@ def _classify_create_external(sql: str):
     along with everything after it, leaving a plain DuckDB table at no location that UC
     never heard of, and reporting success.
     """
-    match = _CREATE_USING_RE.match(sql.strip())
+    # Token spans omit comments while preserving quoted strings, so comments may
+    # appear anywhere in the DDL without hiding an external-table declaration or
+    # making words inside a LOCATION string look like SQL syntax.
+    without_comments = _sql_without_comments(sql)
+    match = _CREATE_USING_RE.match(without_comments.strip())
     if not match or match.group("format").upper() != "DELTA":
         return None
 
