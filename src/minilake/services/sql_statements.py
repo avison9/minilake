@@ -500,7 +500,11 @@ def _ensure_delta_tree_writable(storage_location: str) -> None:
 
 
 async def _execute_delta_write(
-    kind: str, storage_location: str, match: "re.Match"
+    kind: str,
+    storage_location: str,
+    match: "re.Match",
+    catalog: Optional[str] = None,
+    schema_name: Optional[str] = None,
 ) -> tuple[List[str], List[List[Any]]]:
     """Execute a real INSERT/UPDATE/DELETE against an EXTERNAL Delta table via
     a generated Spark job — DuckDB's delta extension can't write, so this is
@@ -530,69 +534,75 @@ async def _execute_delta_write(
         parquet_path = scratch_dir / f"{tmp_table}.parquet"
         conn = await pool.get_uc_connection()
         async with await pool.get_uc_lock():
+            previous = await _apply_default_namespace(conn, catalog, schema_name)
             try:
-                # Read the existing Delta table's real schema (name + type) via
-                # delta_scan (read-only, fine for inspection) so the appended
-                # data's types are CAST to match exactly — DuckDB's literal type
-                # inference (e.g. a bare integer -> INTEGER) commonly doesn't
-                # match the real table's type (e.g. pandas/Spark int64 -> BIGINT),
-                # and Delta's writer rejects mismatched types rather than
-                # silently truncating. A first-ever write (no existing data) has
-                # no schema to conform to, so falls back to no casting.
                 try:
-                    schema_rows = conn.execute(f"DESCRIBE SELECT * FROM delta_scan('{storage_location}')").fetchall()
-                    target_schema = [(row[0], row[1]) for row in schema_rows]
-                except Exception:
-                    target_schema = None
+                    # Read the existing Delta table's real schema (name + type) via
+                    # delta_scan (read-only, fine for inspection) so the appended
+                    # data's types are CAST to match exactly — DuckDB's literal type
+                    # inference (e.g. a bare integer -> INTEGER) commonly doesn't
+                    # match the real table's type (e.g. pandas/Spark int64 -> BIGINT),
+                    # and Delta's writer rejects mismatched types rather than
+                    # silently truncating. A first-ever write (no existing data) has
+                    # no schema to conform to, so falls back to no casting.
+                    try:
+                        schema_rows = conn.execute(
+                            f"DESCRIBE SELECT * FROM delta_scan('{storage_location}')"
+                        ).fetchall()
+                        target_schema = [(row[0], row[1]) for row in schema_rows]
+                    except Exception:
+                        target_schema = None
 
-                if payload.strip().upper().startswith("VALUES"):
-                    # Delta's append mode checks column *names*, not just position,
-                    # so a plain `VALUES (...)` insert (no explicit column list)
-                    # needs real column names too.
-                    if explicit_columns:
-                        col_names = [c.strip() for c in explicit_columns.split(",")]
-                    elif target_schema:
-                        col_names = [name for name, _ in target_schema]
-                    else:
-                        raise DatabricksError(
-                            error_code="INVALID_REQUEST",
-                            message=(
-                                "Cannot infer column names for INSERT INTO ... VALUES without an "
-                                "explicit column list: the Delta table has no existing data/schema "
-                                "to read yet. Either write the table's first version with Spark "
-                                "directly, or use INSERT INTO table (col1, col2) VALUES (...)."
-                            ),
-                            status_code=400,
+                    if payload.strip().upper().startswith("VALUES"):
+                        # Delta's append mode checks column *names*, not just position,
+                        # so a plain `VALUES (...)` insert (no explicit column list)
+                        # needs real column names too.
+                        if explicit_columns:
+                            col_names = [c.strip() for c in explicit_columns.split(",")]
+                        elif target_schema:
+                            col_names = [name for name, _ in target_schema]
+                        else:
+                            raise DatabricksError(
+                                error_code="INVALID_REQUEST",
+                                message=(
+                                    "Cannot infer column names for INSERT INTO ... VALUES without an "
+                                    "explicit column list: the Delta table has no existing data/schema "
+                                    "to read yet. Either write the table's first version with Spark "
+                                    "directly, or use INSERT INTO table (col1, col2) VALUES (...)."
+                                ),
+                                status_code=400,
+                            )
+                        col_list = ", ".join(col_names)
+                        if target_schema:
+                            type_by_name = dict(target_schema)
+                            select_exprs = ", ".join(
+                                f"CAST({name} AS {type_by_name[name]}) AS {name}" if name in type_by_name else name
+                                for name in col_names
+                            )
+                        else:
+                            select_exprs = "*"
+                        conn.execute(
+                            f"CREATE TEMP TABLE {tmp_table} AS SELECT {select_exprs} FROM ({payload}) AS t({col_list})"
                         )
-                    col_list = ", ".join(col_names)
-                    if target_schema:
-                        type_by_name = dict(target_schema)
-                        select_exprs = ", ".join(
-                            f"CAST({name} AS {type_by_name[name]}) AS {name}" if name in type_by_name else name
-                            for name in col_names
-                        )
                     else:
-                        select_exprs = "*"
-                    conn.execute(
-                        f"CREATE TEMP TABLE {tmp_table} AS SELECT {select_exprs} FROM ({payload}) AS t({col_list})"
+                        if target_schema:
+                            cast_exprs = ", ".join(
+                                f"CAST({name} AS {sql_type}) AS {name}" for name, sql_type in target_schema
+                            )
+                            conn.execute(f"CREATE TEMP TABLE {tmp_table} AS SELECT {cast_exprs} FROM ({payload})")
+                        else:
+                            conn.execute(f"CREATE TEMP TABLE {tmp_table} AS {payload}")
+                    row_count = conn.execute(f"SELECT COUNT(*) FROM {tmp_table}").fetchone()[0]
+                    conn.execute(f"COPY {tmp_table} TO '{parquet_path}' (FORMAT PARQUET)")
+                    conn.execute(f"DROP TABLE {tmp_table}")
+                except DatabricksError:
+                    raise
+                except Exception as e:
+                    raise DatabricksError(
+                        error_code="INVALID_REQUEST", message=f"Failed to prepare INSERT data: {e}", status_code=400
                     )
-                else:
-                    if target_schema:
-                        cast_exprs = ", ".join(
-                            f"CAST({name} AS {sql_type}) AS {name}" for name, sql_type in target_schema
-                        )
-                        conn.execute(f"CREATE TEMP TABLE {tmp_table} AS SELECT {cast_exprs} FROM ({payload})")
-                    else:
-                        conn.execute(f"CREATE TEMP TABLE {tmp_table} AS {payload}")
-                row_count = conn.execute(f"SELECT COUNT(*) FROM {tmp_table}").fetchone()[0]
-                conn.execute(f"COPY {tmp_table} TO '{parquet_path}' (FORMAT PARQUET)")
-                conn.execute(f"DROP TABLE {tmp_table}")
-            except DatabricksError:
-                raise
-            except Exception as e:
-                raise DatabricksError(
-                    error_code="INVALID_REQUEST", message=f"Failed to prepare INSERT data: {e}", status_code=400
-                )
+            finally:
+                _restore_default_namespace(conn, previous)
 
         script = (
             "from pyspark.sql import SparkSession\n"
@@ -724,6 +734,28 @@ async def _register_external_delta(
     return [], []
 
 
+async def _validate_special_statement_namespace(catalog: Optional[str], schema_name: Optional[str]) -> None:
+    """Validate an explicit statement namespace before special SQL paths write data."""
+    if not catalog and not schema_name:
+        return
+
+    pool = get_duckdb_pool()
+    if not pool:
+        raise DatabricksError(error_code="INVALID_STATE", message="DuckDB pool not initialized", status_code=500)
+
+    try:
+        conn = await pool.get_uc_connection()
+        lock = await pool.get_uc_lock()
+    except Exception as e:
+        raise DatabricksError(
+            error_code="INVALID_REQUEST", message=f"Failed to get UC connection: {e}", status_code=400
+        ) from e
+
+    async with lock:
+        previous = await _apply_default_namespace(conn, catalog, schema_name)
+        _restore_default_namespace(conn, previous)
+
+
 async def _execute_sql_real(
     warehouse_id: str,
     sql: str,
@@ -754,6 +786,7 @@ async def _execute_sql_real_typed(
 
     create_external = _classify_create_external(sql)
     if create_external is not None:
+        await _validate_special_statement_namespace(catalog, schema_name)
         columns, rows = await _register_external_delta(*create_external)
         return columns, [None] * len(columns), rows
 
@@ -761,8 +794,9 @@ async def _execute_sql_real_typed(
 
     delta_write = _classify_delta_write(sql)
     if delta_write is not None:
+        await _validate_special_statement_namespace(catalog, schema_name)
         kind, storage_location, match = delta_write
-        columns, rows = await _execute_delta_write(kind, storage_location, match)
+        columns, rows = await _execute_delta_write(kind, storage_location, match, catalog, schema_name)
         return columns, [None] * len(columns), rows
 
     pool = get_duckdb_pool()
