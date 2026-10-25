@@ -6,11 +6,18 @@ requires `contents` to be base64, and the SDK does not encode it for you
 So every `put()` call below base64-encodes first, matching real usage.
 """
 
+import asyncio
 import base64
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import DatabricksError
+
+from minilake.errors import DatabricksError as MinilakeDatabricksError
+from minilake.models.dbfs import MoveDbfsRequest
+from minilake.services import dbfs
 
 SAMPLE = b"minilake dbfs real content\n"
 
@@ -115,6 +122,31 @@ def test_dbfs_move_rejects_existing_empty_directory_destination(workspace_client
     assert base64.b64decode(workspace_client.dbfs.read("/move_dir_src/child.txt").data) == b"source"
     assert workspace_client.dbfs.get_status("/move_dir_dst").is_dir
     assert list(workspace_client.dbfs.list("/move_dir_dst")) == []
+
+
+@pytest.mark.error
+def test_dbfs_move_fails_safely_when_exclusive_rename_is_unavailable(tmp_path, monkeypatch):
+    """Unsupported filesystems must not fall back to an overwriting rename."""
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_bytes(b"source data")
+
+    monkeypatch.setattr(dbfs.sys, "platform", "linux")
+    monkeypatch.setattr(dbfs.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(dbfs, "_resolve", lambda path: source if path == "/source.txt" else destination)
+
+    def unexpected_overwriting_rename(_self: Path, _destination: Path):
+        raise AssertionError("ordinary Path.rename must not be used as a fallback")
+
+    monkeypatch.setattr(Path, "rename", unexpected_overwriting_rename)
+
+    with pytest.raises(MinilakeDatabricksError) as exc:
+        asyncio.run(dbfs.move_path(MoveDbfsRequest(source_path="/source.txt", destination_path="/destination.txt")))
+
+    assert exc.value.error_code == "NOT_IMPLEMENTED"
+    assert exc.value.status_code == 501
+    assert source.read_bytes() == b"source data"
+    assert not destination.exists()
 
 
 @pytest.mark.error

@@ -106,11 +106,11 @@ def _rename_without_replace(source: Path, destination: Path) -> None:
     if error_number not in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
         raise OSError(error_number, os.strerror(error_number), str(destination))
 
-    # Some filesystems do not implement the platform's exclusive rename flag.
-    # Keep the ordinary single-process DBFS path safe on those filesystems.
+    # Do not fall back to Path.rename here: it can replace a destination created
+    # concurrently after an existence check and silently discard its contents.
     if destination.exists():
         raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination))
-    source.rename(destination)
+    raise NotImplementedError("Exclusive rename is not supported by this filesystem")
 
 
 def _b64_decode(data: str) -> bytes:
@@ -273,6 +273,12 @@ async def move_path(req: MoveDbfsRequest) -> dict:
             error_code="RESOURCE_ALREADY_EXISTS",
             message=f"Path '{req.destination_path}' already exists",
             status_code=400,
+        ) from None
+    except NotImplementedError as e:
+        raise DatabricksError(
+            error_code="NOT_IMPLEMENTED",
+            message=f"Cannot move '{req.source_path}': {e}",
+            status_code=501,
         ) from None
     return {}
 
