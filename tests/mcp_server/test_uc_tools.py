@@ -122,6 +122,43 @@ async def test_seed_table_surfaces_a_bad_column_type(mcp):
     assert "does not exist" not in message
 
 
+@pytest.mark.parametrize(
+    ("case", "columns", "rows", "recreate", "error_fragment"),
+    [
+        ("invalid_value", [{"name": "id", "type_text": "INTEGER"}], [["not an integer"]], False, "not an integer"),
+        ("invalid_recreate_type", [{"name": "id", "type_text": "NOT_A_TYPE"}], [[43]], True, "not_a_type"),
+        (
+            "invalid_recreate_value",
+            [{"name": "id", "type_text": "INTEGER"}],
+            [["not an integer"]],
+            True,
+            "not an integer",
+        ),
+    ],
+)
+async def test_seed_table_failed_replacement_preserves_existing_table(
+    mcp, case, columns, rows, recreate, error_fragment
+):
+    """A failed replacement must leave both the existing table and its rows intact."""
+    full_name = f"seedpreserve.s.{case}"
+    original_columns = [{"name": "id", "type_text": "INTEGER"}]
+    await mcp.call(
+        "seed_table",
+        {"full_name": full_name, "columns": original_columns, "rows": [[41], [42]]},
+    )
+
+    error = await mcp.call_expecting_error(
+        "seed_table",
+        {"full_name": full_name, "columns": columns, "rows": rows, "recreate": recreate},
+    )
+
+    assert error_fragment in error.lower()
+    result = await mcp.call("run_sql", {"statement": f'SELECT id FROM "seedpreserve"."s"."{case}" ORDER BY id'})
+    assert result["rows"] == [[41], [42]]
+    table = await mcp.call("describe_table", {"full_name": full_name})
+    assert [column["name"] for column in table["columns"]] == ["id"]
+
+
 async def test_seed_table_accepts_databricks_types(mcp):
     """Databricks type names are what a model will reach for first."""
     result = await mcp.call(
