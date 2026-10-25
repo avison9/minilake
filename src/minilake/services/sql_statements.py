@@ -686,6 +686,20 @@ async def _apply_default_namespace(conn, catalog: Optional[str], schema_name: Op
     """Point the connection at `catalog[.schema]`, returning what to restore afterwards."""
     if not catalog and not schema_name:
         return None
+
+    if catalog:
+        from minilake.services import unity_catalog
+
+        # DuckDB accepts `USE <name>` when the name is a schema in the current
+        # catalog, even if it is not a catalog. Check the UC registry first so a
+        # catalog-only request cannot silently select a same-named schema.
+        if catalog != "unity_catalog" and catalog not in unity_catalog._state["catalogs"]:
+            raise DatabricksError(
+                error_code="INVALID_PARAMETER_VALUE",
+                message=f"Catalog '{catalog}' does not exist",
+                status_code=400,
+            )
+
     current = conn.execute("SELECT current_catalog(), current_schema()").fetchone()
     target = f'"{catalog}"' if catalog else f'"{current[0]}"'
     if schema_name:

@@ -253,8 +253,19 @@ def test_insert_into_external_delta_table_with_explicit_columns(
         pytest.param("UPDATE {target} SET id = 2 WHERE id = 1", id="update"),
     ],
 )
+@pytest.mark.parametrize(
+    ("catalog", "requested_schema"),
+    [
+        pytest.param("missing_catalog", "missing_schema", id="missing-catalog-and-schema"),
+        pytest.param("main", None, id="missing-catalog-matches-default-schema"),
+    ],
+)
 def test_external_delta_write_rejects_invalid_namespace(
-    delta_catalog_and_schema, workspace_client: WorkspaceClient, statement_template: str
+    delta_catalog_and_schema,
+    workspace_client: WorkspaceClient,
+    statement_template: str,
+    catalog: str,
+    requested_schema: str | None,
 ):
     """Invalid statement namespaces must not mutate an EXTERNAL Delta table."""
     cat, schema = delta_catalog_and_schema
@@ -274,8 +285,8 @@ def test_external_delta_write_rejects_invalid_namespace(
                 statement=statement_template.format(
                     target=f"{cat.name}.{schema.name}.{table_name}", source=source_table
                 ),
-                catalog=f"missing_catalog_{uuid4().hex[:6]}",
-                schema=f"missing_schema_{uuid4().hex[:6]}",
+                catalog=catalog,
+                schema=requested_schema,
             )
 
         assert DeltaTable(storage_location).to_pandas()["id"].tolist() == [1]

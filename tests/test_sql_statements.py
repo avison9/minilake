@@ -235,6 +235,7 @@ def test_execute_insert_and_select(warehouse_with_table, workspace_client):
     [
         pytest.param("missing_namespace_catalog", "missing_schema", id="missing-catalog"),
         pytest.param("namespace_valid_catalog", "missing_schema", id="missing-schema"),
+        pytest.param("main", None, id="missing-catalog-matches-default-schema"),
     ],
 )
 @pytest.mark.parametrize(
@@ -249,7 +250,7 @@ def test_execute_insert_and_select(warehouse_with_table, workspace_client):
 def test_invalid_namespace_rejects_statement_without_fallback(
     workspace_client: WorkspaceClient,
     catalog: str,
-    schema: str,
+    schema: str | None,
     statement_template: str,
 ):
     """Invalid explicit catalog/schema must not run SQL in the connection's old namespace."""
