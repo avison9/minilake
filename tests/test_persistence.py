@@ -10,6 +10,7 @@ state, restarts the process against the same data dir, and verifies the
 state survived — using the real databricks-sdk client throughout.
 """
 
+import base64
 import os
 import shutil
 import socket
@@ -17,10 +18,13 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import uuid
+from pathlib import Path
 
 import pytest
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.catalog import DataSourceFormat, TableType
+from databricks.sdk.errors import DatabricksError
+from databricks.sdk.service.catalog import DataSourceFormat, TableType, VolumeType
 from databricks.sdk.service.sql import ColumnInfo
 
 
@@ -124,6 +128,58 @@ def test_persist_state_survives_restart():
         )
 
         print("✓ MINILAKE_PERSIST=1 really survives a process restart")
+    finally:
+        if proc is not None:
+            _stop_minilake(proc)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+@pytest.mark.serial
+def test_legacy_volume_files_migrate_on_restart():
+    """Files created under the pre-UC volume path remain readable after upgrade."""
+    data_dir = tempfile.mkdtemp(prefix="minilake_volume_migration_")
+    port = _free_port()
+    proc = None
+    try:
+        proc = _start_minilake(port, data_dir)
+        client = WorkspaceClient(host=f"http://127.0.0.1:{port}", token="dev", auth_type="pat")
+        catalog_name = f"migration_{uuid.uuid4().hex[:8]}"
+        schema_name = "migration_schema"
+        volume_name = "migration_volume"
+        client.catalogs.create(name=catalog_name)
+        client.schemas.create(name=schema_name, catalog_name=catalog_name)
+        client.volumes.create(
+            name=volume_name,
+            catalog_name=catalog_name,
+            schema_name=schema_name,
+            volume_type=VolumeType.MANAGED,
+        )
+
+        payload = b"legacy volume data survives upgrade\n"
+        legacy_file = Path(data_dir) / "dbfs" / "Volumes" / catalog_name / schema_name / volume_name / "legacy.txt"
+        legacy_file.parent.mkdir(parents=True)
+        legacy_file.write_bytes(payload)
+        volume_path = f"/Volumes/{catalog_name}/{schema_name}/{volume_name}/legacy.txt"
+        full_volume_name = f"{catalog_name}.{schema_name}.{volume_name}"
+
+        _stop_minilake(proc)
+        proc = None
+        proc = _start_minilake(port, data_dir)
+        client = WorkspaceClient(host=f"http://127.0.0.1:{port}", token="dev", auth_type="pat")
+
+        assert client.files.download(volume_path).contents.read() == payload
+        dbfs_data = client.dbfs.read(path=volume_path).data
+        assert base64.b64decode(dbfs_data) == payload
+        assert (
+            Path(data_dir) / "volumes" / catalog_name / schema_name / volume_name / "legacy.txt"
+        ).read_bytes() == payload
+        assert not legacy_file.exists()
+
+        client.volumes.delete(name=full_volume_name)
+        with pytest.raises(DatabricksError):
+            client.files.download(volume_path)
+        with pytest.raises(DatabricksError):
+            client.dbfs.read(path=volume_path)
     finally:
         if proc is not None:
             _stop_minilake(proc)
