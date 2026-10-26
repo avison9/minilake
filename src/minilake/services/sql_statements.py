@@ -407,21 +407,176 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
     if not external_tables:
         return sql
 
-    def replace_qualified_name(match):
-        catalog = match.group(1)
-        schema = match.group(2)
-        table = match.group(3)
-        full_name = f"{catalog}.{schema}.{table}"
+    # Tokenize executable SQL while skipping literals and comments. Quoted
+    # identifiers stay as tokens so fully quoted table names still work, but
+    # can never be mistaken for keywords such as FROM or JOIN.
+    tokens = []
+    i = 0
+    while i < len(sql):
+        if _is_duckdb_space(sql[i]):
+            i += 1
+        elif sql.startswith("--", i):
+            while i < len(sql) and sql[i] not in "\r\n":
+                i += 1
+        elif sql.startswith("/*", i):
+            depth = 1
+            i += 2
+            while i < len(sql) and depth:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+        elif sql[i] == "'":
+            backslash_escapes = i > 0 and sql[i - 1] in "eE" and (i == 1 or not _is_duckdb_identifier_char(sql[i - 2]))
+            i, closed = _scan_quoted_token(sql, i, "'", backslash_escapes)
+            if backslash_escapes and closed:
+                while True:
+                    continuation = _skip_string_continuation_whitespace(sql, i)
+                    if continuation is None or continuation >= len(sql) or sql[continuation] != "'":
+                        break
+                    i, closed = _scan_quoted_token(sql, continuation, "'", backslash_escapes=True)
+                    if not closed:
+                        break
+        elif sql[i] == "$" and (dollar_quote := _dollar_quote_delimiter(sql, i)):
+            end = sql.find(dollar_quote, i + len(dollar_quote))
+            i = len(sql) if end == -1 else end + len(dollar_quote)
+        elif sql[i] in '"`':
+            start = i
+            quote = sql[i]
+            i, closed = _scan_quoted_token(sql, i, quote)
+            raw = sql[start + 1 : i - 1] if closed else sql[start + 1 : i]
+            value = raw.replace(quote * 2, quote)
+            tokens.append((start, i, "quoted_identifier", value))
+        elif _is_duckdb_identifier_char(sql[i]):
+            start = i
+            while i < len(sql) and _is_duckdb_identifier_char(sql[i]):
+                i += 1
+            tokens.append((start, i, "word", sql[start:i]))
+        else:
+            tokens.append((i, i + 1, "symbol", sql[i]))
+            i += 1
 
-        external = external_tables.get(full_name)
-        if external:
-            storage_location = external["storage_location"]
-            return f"delta_scan('{storage_location}')"
+    def external_name_at(token_index):
+        """Return (name, end-token-index) for a contiguous three-part identifier."""
+        parts = []
+        cursor = token_index
+        for part_index in range(3):
+            if cursor >= len(tokens) or tokens[cursor][2] not in ("word", "quoted_identifier"):
+                return None
+            parts.append(tokens[cursor][3])
+            if part_index < 2:
+                dot_index = cursor + 1
+                next_part_index = cursor + 2
+                if (
+                    next_part_index >= len(tokens)
+                    or tokens[dot_index][2:] != ("symbol", ".")
+                    or tokens[cursor][1] != tokens[dot_index][0]
+                    or tokens[dot_index][1] != tokens[next_part_index][0]
+                ):
+                    return None
+                cursor = next_part_index
 
-        return match.group(0)
+        next_index = cursor + 1
+        if (
+            next_index < len(tokens)
+            and tokens[next_index][2:] == ("symbol", ".")
+            and tokens[cursor][1] == tokens[next_index][0]
+        ):
+            return None
+        return ".".join(parts), cursor
 
-    # Match patterns like "catalog"."schema"."table" or catalog.schema.table
-    sql = re.sub(r'"?(\w+)"?\."?(\w+)"?\."?(\w+)"?', replace_qualified_name, sql)
+    replacements = []
+    scopes = [{"in_from": False, "expect_relation": False}]
+    relation_modifiers = {"LATERAL", "ONLY"}
+    clause_ends = {
+        "EXCEPT",
+        "FETCH",
+        "GROUP",
+        "HAVING",
+        "INTERSECT",
+        "LIMIT",
+        "OFFSET",
+        "ON",
+        "ORDER",
+        "QUALIFY",
+        "RETURNING",
+        "SELECT",
+        "SET",
+        "UNION",
+        "USING",
+        "VALUES",
+        "WHERE",
+        "WINDOW",
+    }
+
+    token_index = 0
+    while token_index < len(tokens):
+        start, _end, kind, value = tokens[token_index]
+        scope = scopes[-1]
+
+        if kind == "symbol" and value == "(":
+            # Parentheses can wrap either a relation or a nested query.
+            relation_group = scope["expect_relation"]
+            scope["expect_relation"] = False
+            scopes.append({"in_from": relation_group, "expect_relation": relation_group})
+            token_index += 1
+            continue
+        if kind == "symbol" and value == ")":
+            if len(scopes) > 1:
+                scopes.pop()
+                scopes[-1]["expect_relation"] = False
+            token_index += 1
+            continue
+        if kind == "symbol" and value == ",":
+            if scope["in_from"]:
+                scope["expect_relation"] = True
+            token_index += 1
+            continue
+
+        if kind == "word":
+            keyword = value.upper()
+            if keyword in {"FROM", "JOIN"}:
+                scope["in_from"] = True
+                scope["expect_relation"] = True
+                token_index += 1
+                continue
+            if keyword in clause_ends:
+                scope["in_from"] = False
+                scope["expect_relation"] = False
+                token_index += 1
+                continue
+            if scope["expect_relation"] and keyword in relation_modifiers:
+                token_index += 1
+                continue
+
+        if scope["expect_relation"] and kind in ("word", "quoted_identifier"):
+            external_name = external_name_at(token_index)
+            if external_name is not None:
+                full_name, last_token_index = external_name
+                external = external_tables.get(full_name)
+                if external:
+                    storage_location = external["storage_location"].replace("'", "''")
+                    replacements.append(
+                        (
+                            start,
+                            tokens[last_token_index][1],
+                            f"delta_scan('{storage_location}')",
+                        )
+                    )
+                token_index = last_token_index + 1
+            else:
+                token_index += 1
+            scope["expect_relation"] = False
+            continue
+
+        token_index += 1
+
+    for start, end, replacement in reversed(replacements):
+        sql = sql[:start] + replacement + sql[end:]
 
     logger.debug(f"Rewritten SQL: {sql}")
     return sql
