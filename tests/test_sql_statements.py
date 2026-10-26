@@ -178,6 +178,28 @@ def test_backtick_identifier_after_unicode_typed_literal(workspace_client: Works
             id="cte-from-first",
         ),
         pytest.param(
+            "WITH values AS (SELECT 1) FROM rewrite.default.external",
+            "WITH values AS (SELECT 1) FROM delta_scan('/data/external''s')",
+            id="values-cte-from-first",
+        ),
+        pytest.param(
+            "CREATE TEMP TABLE values AS FROM rewrite.default.external",
+            "CREATE TEMP TABLE values AS FROM delta_scan('/data/external''s')",
+            id="values-table-from-first",
+        ),
+        pytest.param(
+            "DELETE FROM target USING rewrite.default.external AS source WHERE target.id = source.id",
+            "DELETE FROM target USING delta_scan('/data/external''s') AS source WHERE target.id = source.id",
+            id="delete-using-external-source",
+        ),
+        pytest.param(
+            "MERGE INTO target USING rewrite.default.external AS source ON target.id = source.id "
+            "WHEN MATCHED THEN DELETE",
+            "MERGE INTO target USING delta_scan('/data/external''s') AS source ON target.id = source.id "
+            "WHEN MATCHED THEN DELETE",
+            id="merge-using-external-source",
+        ),
+        pytest.param(
             "SELECT (FROM rewrite.default.external SELECT max(id))",
             "SELECT (FROM delta_scan('/data/external''s') SELECT max(id))",
             id="scalar-subquery-from-first",

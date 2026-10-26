@@ -500,6 +500,8 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
             "expect_relation": False,
             "query_started": False,
             "allow_bare_from": True,
+            "write_kind": None,
+            "write_source_pending": False,
         }
     ]
     relation_modifiers = {"LATERAL", "ONLY"}
@@ -539,6 +541,8 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                     "expect_relation": relation_group,
                     "query_started": False,
                     "allow_bare_from": from_first_query,
+                    "write_kind": None,
+                    "write_source_pending": False,
                 }
             )
             token_index += 1
@@ -560,6 +564,8 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                 expect_relation=False,
                 query_started=False,
                 allow_bare_from=True,
+                write_kind=None,
+                write_source_pending=False,
             )
             token_index += 1
             continue
@@ -593,6 +599,16 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                 and (previous_words[-2] != "NOT" or (len(previous_words) >= 3 and previous_words[-3] == "IS"))
             )
 
+            if (
+                not is_qualified_part
+                and keyword in {"DELETE", "MERGE"}
+                and scope["write_kind"] is None
+                and not scope["query_started"]
+                and not scope["in_from"]
+            ):
+                scope["write_kind"] = keyword
+                scope["write_source_pending"] = True
+
             if not is_qualified_part and keyword == "SELECT":
                 scope["query_started"] = True
                 scope["allow_bare_from"] = False
@@ -619,6 +635,13 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                 scope["allow_bare_from"] = False
                 token_index += 1
                 continue
+            if not is_qualified_part and keyword == "USING" and scope["write_source_pending"]:
+                # DELETE and MERGE use USING to introduce a source relation.
+                scope["in_from"] = True
+                scope["expect_relation"] = True
+                scope["write_source_pending"] = False
+                token_index += 1
+                continue
             if not is_qualified_part and keyword in {"ON", "USING"}:
                 # These begin join/pivot conditions, but the surrounding FROM
                 # list remains active so a following comma can add a relation.
@@ -630,8 +653,15 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                 scope.update(in_from=False, expect_relation=False, query_started=False, allow_bare_from=True)
                 token_index += 1
                 continue
-            if not is_qualified_part and keyword == "VALUES" and scope["in_from"] and not scope["expect_relation"]:
-                # VALUES is permitted as an unquoted table alias in DuckDB.
+            if (
+                not is_qualified_part
+                and keyword == "VALUES"
+                and (
+                    (scope["in_from"] and not scope["expect_relation"])
+                    or (not scope["query_started"] and not scope["in_from"])
+                )
+            ):
+                # VALUES can be an identifier, or start a query operand.
                 token_index += 1
                 continue
             if not is_qualified_part and not is_distinct_from and keyword in clause_ends:
