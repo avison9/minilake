@@ -60,11 +60,13 @@ def _merge_legacy_volume(legacy_path: Path, volume_root: Path) -> bool:
 
 
 def migrate_legacy_volume_data() -> int:
-    """Migrate old `/Volumes` uploads for volumes with existing UC directories."""
+    """Run the one-time migration of old `/Volumes` uploads into UC directories."""
     volumes_root = (settings.data_dir / "volumes").resolve()
-    if not volumes_root.is_dir():
+    migration_marker = volumes_root / ".legacy_volume_migration_complete"
+    if migration_marker.exists():
         return 0
 
+    volumes_root.mkdir(parents=True, exist_ok=True)
     migrated = 0
     for catalog_path in volumes_root.iterdir():
         if catalog_path.is_symlink() or not catalog_path.is_dir():
@@ -80,6 +82,11 @@ def migrate_legacy_volume_data() -> int:
                 )
                 if _merge_legacy_volume(legacy_path, volume_root):
                     migrated += 1
+
+    # Keep later volume creations from adopting files left by volumes deleted
+    # before this upgrade. The marker lives inside volumes/ so a full reset
+    # removes it along with the migrated storage.
+    migration_marker.touch()
     return migrated
 
 
