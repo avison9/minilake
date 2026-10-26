@@ -1,5 +1,6 @@
 """SQL Statement Execution API endpoints."""
 
+import base64
 import csv
 import io
 import json
@@ -991,7 +992,7 @@ async def _execute_sql_real(
     Kept as a two-tuple wrapper around `_execute_sql_real_typed` because
     `services/jobs.py` calls it and has no use for the types.
     """
-    columns, _types, rows = await _execute_sql_real_typed(warehouse_id, sql, catalog, schema_name)
+    columns, _types, rows, _arrow_table = await _execute_sql_real_typed(warehouse_id, sql, catalog, schema_name)
     return columns, rows
 
 
@@ -1000,8 +1001,9 @@ async def _execute_sql_real_typed(
     sql: str,
     catalog: Optional[str] = None,
     schema_name: Optional[str] = None,
-) -> tuple[List[str], List[Optional[str]], List[List[Any]]]:
-    """Execute SQL against DuckDB and return (column_names, column_types, rows).
+    include_arrow: bool = False,
+) -> tuple[List[str], List[Optional[str]], List[List[Any]], Optional[Any]]:
+    """Execute SQL against DuckDB and return columns, types, rows, and optional Arrow data.
 
     Uses UC connection (shared) instead of warehouse-specific connection,
     so that Unity Catalog tables are accessible to all warehouses.
@@ -1011,7 +1013,7 @@ async def _execute_sql_real_typed(
     create_external = _classify_create_external(sql)
     if create_external is not None:
         columns, rows = await _register_external_delta(*create_external)
-        return columns, [None] * len(columns), rows
+        return columns, [None] * len(columns), rows, None
 
     sql = _strip_databricks_ddl_clauses(sql)
 
@@ -1019,7 +1021,7 @@ async def _execute_sql_real_typed(
     if delta_write is not None:
         kind, storage_location, match = delta_write
         columns, rows = await _execute_delta_write(kind, storage_location, match)
-        return columns, [None] * len(columns), rows
+        return columns, [None] * len(columns), rows, None
 
     pool = get_duckdb_pool()
     if not pool:
@@ -1060,13 +1062,20 @@ async def _execute_sql_real_typed(
             description = result.description or []
             columns = [desc[0] for desc in description]
             column_types = [str(desc[1]) if desc[1] is not None else None for desc in description]
-            rows = result.fetchall()
+            arrow_table = result.fetch_arrow_table() if include_arrow else None
+            if arrow_table is None:
+                rows = result.fetchall()
+            else:
+                # Arrow data is serialized from the table below. Keep empty row
+                # placeholders for chunk counts instead of converting Arrow scalars
+                # to Python values, which can fail for dates outside Python's range.
+                rows = [[] for _ in range(arrow_table.num_rows)]
 
             # Format rows for JSON
             formatted_rows = [[_format_value(cell) for cell in row] for row in rows]
 
             logger.debug(f"SQL execution returned {len(rows)} rows")
-            return columns, column_types, formatted_rows
+            return columns, column_types, formatted_rows, arrow_table
 
         except Exception as e:
             logger.error(f"SQL execution failed: {e}")
@@ -1100,6 +1109,44 @@ def _serialize_chunk(columns: List[str], rows: List[List[Any]], fmt: str) -> tup
 
     # JSON_ARRAY
     return json.dumps(rows).encode("utf-8"), "application/json"
+
+
+def _serialize_arrow_table(table: Any, offset: int, length: int) -> bytes:
+    """Serialize a slice of DuckDB's Arrow result while retaining its field types."""
+    import pyarrow as pa
+
+    # Slicing the table retains field metadata, including DuckDB Arrow extensions
+    # such as the opaque type used for VARINT values.
+    chunk = table.slice(offset, length)
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, chunk.schema) as writer:
+        writer.write_table(chunk)
+    return sink.getvalue().to_pybytes()
+
+
+def _serialize_arrow_chunks(table: Any) -> List[str]:
+    """Serialize Arrow chunks as base64 so statement snapshots remain JSON-safe."""
+    chunk_count = max(1, (table.num_rows + _CHUNK_SIZE - 1) // _CHUNK_SIZE)
+    return [
+        base64.b64encode(
+            _serialize_arrow_table(
+                table,
+                index * _CHUNK_SIZE,
+                min(_CHUNK_SIZE, table.num_rows - index * _CHUNK_SIZE),
+            )
+        ).decode("ascii")
+        for index in range(chunk_count)
+    ]
+
+
+def _serialize_stored_chunk(
+    stmt: Dict[str, Any], columns: List[str], rows: List[List[Any]], fmt: str, chunk_index: int
+) -> tuple[bytes, str]:
+    """Return a previously materialized Arrow chunk or serialize the cached rows."""
+    arrow_chunks = stmt.get("raw_arrow_chunks") or []
+    if fmt == "ARROW_STREAM" and chunk_index < len(arrow_chunks):
+        return base64.b64decode(arrow_chunks[chunk_index]), "application/vnd.apache.arrow.stream"
+    return _serialize_chunk(columns, rows, fmt)
 
 
 def _column_infos(columns: List[str], column_types: Optional[List[Optional[str]]] = None) -> List[ColumnInfo]:
@@ -1147,6 +1194,7 @@ def _build_result_data(
     disposition: str,
     fmt: str,
     column_types: Optional[List[Optional[str]]] = None,
+    arrow_chunks: Optional[List[str]] = None,
 ) -> ResultData:
     """Build the ResultData for a statement's first chunk, real INLINE data or
     real self-hosted EXTERNAL_LINKS depending on `disposition`."""
@@ -1154,7 +1202,10 @@ def _build_result_data(
         chunks = [rows[i : i + _CHUNK_SIZE] for i in range(0, len(rows), _CHUNK_SIZE)] or [[]]
         num_chunks = len(chunks)
         chunk_rows = chunks[0]
-        content, _ = _serialize_chunk(columns, chunk_rows, fmt)
+        if fmt == "ARROW_STREAM" and arrow_chunks:
+            content = base64.b64decode(arrow_chunks[0])
+        else:
+            content, _ = _serialize_chunk(columns, chunk_rows, fmt)
         base = str(request.base_url).rstrip("/")
         link = ExternalLink(
             chunk_index=0,
@@ -1226,14 +1277,18 @@ async def execute_statement(req: ExecuteStatementRequest, request: Request) -> E
 
     # Execute SQL synchronously (MVP approach: no background jobs)
     try:
-        columns, column_types, rows = await _execute_sql_real_typed(
+        columns, column_types, rows, arrow_table = await _execute_sql_real_typed(
             req.warehouse_id,
             req.statement,
             req.catalog,
             req.schema_name,
+            include_arrow=fmt == "ARROW_STREAM",
         )
 
-        result_data = _build_result_data(request, statement_id, columns, rows, disposition, fmt, column_types)
+        arrow_chunks = _serialize_arrow_chunks(arrow_table) if arrow_table is not None else []
+        result_data = _build_result_data(
+            request, statement_id, columns, rows, disposition, fmt, column_types, arrow_chunks
+        )
         manifest = _build_manifest(columns, rows, fmt, column_types)
 
         # Store the raw rows/columns too (not just the first chunk's rendering)
@@ -1250,6 +1305,7 @@ async def execute_statement(req: ExecuteStatementRequest, request: Request) -> E
                 "raw_columns": columns,
                 "raw_column_types": column_types,
                 "raw_rows": rows,
+                "raw_arrow_chunks": arrow_chunks,
                 "row_count": len(rows),
                 "disposition": disposition,
                 "format": fmt,
@@ -1363,7 +1419,7 @@ async def get_result_chunk(statement_id: str, chunk_index: int, request: Request
     chunk_rows = chunks[chunk_index]
 
     if disposition == "EXTERNAL_LINKS":
-        content, _ = _serialize_chunk(columns, chunk_rows, fmt)
+        content, _ = _serialize_stored_chunk(stmt, columns, chunk_rows, fmt, chunk_index)
         base = str(request.base_url).rstrip("/")
         link = ExternalLink(
             chunk_index=chunk_index,
@@ -1408,7 +1464,7 @@ async def get_result_chunk_data(statement_id: str, chunk_index: int) -> Response
             status_code=404,
         )
 
-    content, content_type = _serialize_chunk(columns, chunks[chunk_index], fmt)
+    content, content_type = _serialize_stored_chunk(stmt, columns, chunks[chunk_index], fmt, chunk_index)
     return Response(content=content, media_type=content_type)
 
 
