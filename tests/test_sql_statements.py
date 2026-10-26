@@ -456,6 +456,34 @@ def test_external_links_arrow_stream_preserves_sql_types_and_values(workspace_cl
     assert table.column("struct_value").to_pylist() == [{"label": "nested"}]
 
 
+def test_arrow_chunk_serialization_preserves_extension_field_metadata():
+    """Arrow IPC chunks retain metadata needed to interpret opaque SQL types."""
+    import pyarrow as pa
+
+    from minilake.services.sql_statements import _serialize_arrow_table
+
+    field_metadata = {
+        b"ARROW:extension:name": b"arrow.opaque",
+        b"ARROW:extension:metadata": b'{"type_name":"bignum","vendor_name":"DuckDB"}',
+    }
+    schema = pa.schema([pa.field("value", pa.binary(), metadata=field_metadata)])
+    source = pa.Table.from_arrays([pa.array([b"\x80\x00\x01{"])], schema=schema)
+
+    serialized = _serialize_arrow_table(source, 0, source.num_rows)
+    restored = pa.ipc.open_stream(serialized).read_all()
+
+    restored_field = restored.schema.field("value")
+    if hasattr(restored_field.type, "extension_name"):
+        assert restored_field.type.extension_name == "arrow.opaque"
+        assert restored_field.type.storage_type == pa.binary()
+        assert restored_field.type.type_name == "bignum"
+        assert restored_field.type.vendor_name == "DuckDB"
+    else:
+        assert restored_field.type == pa.binary()
+        assert restored_field.metadata == field_metadata
+    assert restored.column("value").to_pylist() == [b"\x80\x00\x01{"]
+
+
 @pytest.mark.workflow
 @pytest.mark.parametrize(
     "statement, expected_rows",

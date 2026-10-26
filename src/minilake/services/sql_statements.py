@@ -853,28 +853,26 @@ def _serialize_chunk(columns: List[str], rows: List[List[Any]], fmt: str) -> tup
     return json.dumps(rows).encode("utf-8"), "application/json"
 
 
-def _serialize_arrow_table(table: Any, columns: List[str], offset: int, length: int) -> bytes:
+def _serialize_arrow_table(table: Any, offset: int, length: int) -> bytes:
     """Serialize a slice of DuckDB's Arrow result while retaining its field types."""
     import pyarrow as pa
 
-    # Keep the existing name-keyed column behavior here; this change is about
-    # preserving SQL types and values, independently of duplicate-column handling.
-    arrays = [table.column(index).slice(offset, length) for index in range(len(columns))]
-    chunk = pa.table({column: arrays[index] for index, column in enumerate(columns)})
+    # Slicing the table retains field metadata, including DuckDB Arrow extensions
+    # such as the opaque type used for VARINT values.
+    chunk = table.slice(offset, length)
     sink = pa.BufferOutputStream()
     with pa.ipc.new_stream(sink, chunk.schema) as writer:
         writer.write_table(chunk)
     return sink.getvalue().to_pybytes()
 
 
-def _serialize_arrow_chunks(table: Any, columns: List[str]) -> List[str]:
+def _serialize_arrow_chunks(table: Any) -> List[str]:
     """Serialize Arrow chunks as base64 so statement snapshots remain JSON-safe."""
     chunk_count = max(1, (table.num_rows + _CHUNK_SIZE - 1) // _CHUNK_SIZE)
     return [
         base64.b64encode(
             _serialize_arrow_table(
                 table,
-                columns,
                 index * _CHUNK_SIZE,
                 min(_CHUNK_SIZE, table.num_rows - index * _CHUNK_SIZE),
             )
@@ -1029,7 +1027,7 @@ async def execute_statement(req: ExecuteStatementRequest, request: Request) -> E
             include_arrow=fmt == "ARROW_STREAM",
         )
 
-        arrow_chunks = _serialize_arrow_chunks(arrow_table, columns) if arrow_table is not None else []
+        arrow_chunks = _serialize_arrow_chunks(arrow_table) if arrow_table is not None else []
         result_data = _build_result_data(
             request, statement_id, columns, rows, disposition, fmt, column_types, arrow_chunks
         )
