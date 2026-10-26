@@ -4,6 +4,7 @@ import base64
 
 import pytest
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.workspace import ImportFormat, Language
 
 SAMPLE_SCRIPT = b"print('hello from minilake workspace test')\n"
@@ -110,15 +111,16 @@ def test_workspace_notebook_import_does_not_replace_directory(workspace_client: 
     workspace_client.workspace.mkdirs(path=path)
     before = workspace_client.workspace.get_status(path=path)
 
-    with pytest.raises(Exception):
+    with pytest.raises(DatabricksError) as error:
         workspace_client.workspace.import_(
             path=path,
             content=base64.b64encode(SAMPLE_SCRIPT).decode("ascii"),
             format=ImportFormat.SOURCE,
             language=Language.PYTHON,
-            overwrite=True,
+            overwrite=False,
         )
 
+    assert error.value.error_code == "RESOURCE_ALREADY_EXISTS"
     after = workspace_client.workspace.get_status(path=path)
     assert after.object_type.value == "DIRECTORY"
     assert after.object_id == before.object_id

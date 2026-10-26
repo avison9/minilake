@@ -160,17 +160,17 @@ async def import_object(req: ImportWorkspaceRequest) -> dict:
     normalized = _normalize(req.path)
     file_path = _resolve(normalized)
 
-    if file_path.is_dir():
-        raise DatabricksError(
-            error_code="INVALID_REQUEST",
-            message=f"Path '{normalized}' is a directory",
-            status_code=400,
-        )
-
     if file_path.exists() and not req.overwrite:
         raise DatabricksError(
             error_code="RESOURCE_ALREADY_EXISTS",
             message=f"Path '{normalized}' already exists",
+            status_code=400,
+        )
+
+    if file_path.is_dir():
+        raise DatabricksError(
+            error_code="INVALID_REQUEST",
+            message=f"Path '{normalized}' is a directory",
             status_code=400,
         )
 
