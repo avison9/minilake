@@ -614,7 +614,12 @@ async def _execute_run_tasks(run_id: int, argv: List[str]) -> None:
                     state=RunState(life_cycle_state="SKIPPED", state_message="Unresolvable dependency or cycle"),
                 )
             break
-        await asyncio.gather(*(run_one(k) for k in ready))
+        outcomes = await asyncio.gather(*(run_one(k) for k in ready), return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, asyncio.CancelledError):
+                raise RuntimeError("A job task was cancelled unexpectedly") from outcome
+            if isinstance(outcome, Exception):
+                raise outcome
         pending -= set(ready)
 
     task_results = [results[t.task_key] for t in tasks]

@@ -132,7 +132,7 @@ def test_submit_sql_task_directory_fails_terminally(workspace_client: WorkspaceC
 
     assert run.state.life_cycle_state.value == "TERMINATED"
     assert run.state.result_state.value == "FAILED"
-    assert "not a file" in (run.state.state_message or "")
+    assert "not a file" in (run.tasks[0].state.state_message or "")
     output = workspace_client.jobs.get_run_output(run_id=run.run_id)
     assert "not a file" in (output.error or "")
 
@@ -166,13 +166,37 @@ def test_run_executor_exception_marks_run_failed_with_diagnostics(monkeypatch):
         "_tasks": [{"task_key": "unexpected"}],
     }
     jobs._state["runs"][run_id] = run
+    sibling_started = asyncio.Event()
+    release_sibling = asyncio.Event()
+    sibling_finished = asyncio.Event()
 
     async def fail_executor(task, argv):
-        raise RuntimeError("executor exploded")
+        if task.task_key == "unexpected":
+            await sibling_started.wait()
+            raise RuntimeError("executor exploded")
+        sibling_started.set()
+        try:
+            await release_sibling.wait()
+        finally:
+            sibling_finished.set()
+        return jobs.RunTaskInfo(task_key=task.task_key, state=jobs.RunState(life_cycle_state="TERMINATED"))
+
+    run["_tasks"].append({"task_key": "sibling"})
 
     monkeypatch.setattr(jobs, "_execute_task", fail_executor)
     try:
-        asyncio.run(jobs._execute_run(run_id, []))
+
+        async def run_with_sibling():
+            running = asyncio.create_task(jobs._execute_run(run_id, []))
+            await asyncio.wait_for(sibling_started.wait(), timeout=1)
+            await asyncio.sleep(0.01)
+            assert not running.done()
+            assert run["state"]["life_cycle_state"] == "RUNNING"
+            release_sibling.set()
+            await running
+
+        asyncio.run(run_with_sibling())
+        assert sibling_finished.is_set()
         assert run["state"]["life_cycle_state"] == "TERMINATED"
         assert run["state"]["result_state"] == "FAILED"
         assert "executor exploded" in run["state"]["state_message"]
