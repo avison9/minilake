@@ -56,7 +56,7 @@ def _normalize(path: str) -> str:
 
 def _resolve(path: str) -> Path:
     normalized = _normalize(path)
-    root = _dbfs_root()
+    root = _dbfs_root().resolve()
     resolved = (root / normalized.lstrip("/")).resolve()
     if resolved != root and root not in resolved.parents:
         raise DatabricksError(error_code="INVALID_REQUEST", message="Invalid path", status_code=400)
