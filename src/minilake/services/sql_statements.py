@@ -797,7 +797,7 @@ async def _execute_sql_real(
     Kept as a two-tuple wrapper around `_execute_sql_real_typed` because
     `services/jobs.py` calls it and has no use for the types.
     """
-    columns, _types, rows = await _execute_sql_real_typed(warehouse_id, sql, catalog, schema_name)
+    columns, _types, rows, _arrow_table = await _execute_sql_real_typed(warehouse_id, sql, catalog, schema_name)
     return columns, rows
 
 
@@ -806,8 +806,8 @@ async def _execute_sql_real_typed(
     sql: str,
     catalog: Optional[str] = None,
     schema_name: Optional[str] = None,
-) -> tuple[List[str], List[Optional[str]], List[List[Any]]]:
-    """Execute SQL against DuckDB and return (column_names, column_types, rows).
+) -> tuple[List[str], List[Optional[str]], List[List[Any]], Optional[Any]]:
+    """Execute SQL against DuckDB and return columns, column_types, rows, and optional native data.
 
     Uses UC connection (shared) instead of warehouse-specific connection,
     so that Unity Catalog tables are accessible to all warehouses.
@@ -818,7 +818,7 @@ async def _execute_sql_real_typed(
     if create_external is not None:
         await _validate_special_statement_namespace(catalog, schema_name)
         columns, rows = await _register_external_delta(*create_external)
-        return columns, [None] * len(columns), rows
+        return columns, [None] * len(columns), rows, None
 
     sql = _strip_databricks_ddl_clauses(sql)
 
@@ -827,7 +827,7 @@ async def _execute_sql_real_typed(
         await _validate_special_statement_namespace(catalog, schema_name)
         kind, storage_location, match = delta_write
         columns, rows = await _execute_delta_write(kind, storage_location, match, catalog, schema_name)
-        return columns, [None] * len(columns), rows
+        return columns, [None] * len(columns), rows, None
 
     pool = get_duckdb_pool()
     if not pool:
@@ -874,7 +874,7 @@ async def _execute_sql_real_typed(
             formatted_rows = [[_format_value(cell) for cell in row] for row in rows]
 
             logger.debug(f"SQL execution returned {len(rows)} rows")
-            return columns, column_types, formatted_rows
+            return columns, column_types, formatted_rows, None
 
         except Exception as e:
             logger.error(f"SQL execution failed: {e}")
@@ -1034,7 +1034,7 @@ async def execute_statement(req: ExecuteStatementRequest, request: Request) -> E
 
     # Execute SQL synchronously (MVP approach: no background jobs)
     try:
-        columns, column_types, rows = await _execute_sql_real_typed(
+        columns, column_types, rows, _arrow_table = await _execute_sql_real_typed(
             req.warehouse_id,
             req.statement,
             req.catalog,
