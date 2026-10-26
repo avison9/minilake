@@ -804,16 +804,14 @@ async def _execute_sql_real_typed(
             description = result.description or []
             columns = [desc[0] for desc in description]
             column_types = [str(desc[1]) if desc[1] is not None else None for desc in description]
-            arrow_table = result.to_arrow_table() if include_arrow else None
+            arrow_table = result.fetch_arrow_table() if include_arrow else None
             if arrow_table is None:
                 rows = result.fetchall()
             else:
-                # Read by ordinal so duplicate column names do not collapse while
-                # converting Arrow results to the JSON-compatible cached rows.
-                rows = [
-                    [arrow_table.column(column_index)[row_index].as_py() for column_index in range(len(columns))]
-                    for row_index in range(arrow_table.num_rows)
-                ]
+                # Arrow data is serialized from the table below. Keep empty row
+                # placeholders for chunk counts instead of converting Arrow scalars
+                # to Python values, which can fail for dates outside Python's range.
+                rows = [[] for _ in range(arrow_table.num_rows)]
 
             # Format rows for JSON
             formatted_rows = [[_format_value(cell) for cell in row] for row in rows]

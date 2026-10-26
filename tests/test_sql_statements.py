@@ -415,6 +415,8 @@ def test_external_links_arrow_stream_preserves_sql_types_and_values(workspace_cl
         warehouse_id=wh.id,
         statement=(
             "SELECT DATE '2024-01-01' AS date_value, "
+            "DATE '10000-01-01' AS far_date_value, "
+            "DATE 'infinity' AS infinite_date_value, "
             "TIMESTAMP '2024-01-02 03:04:05.123456' AS timestamp_value, "
             "CAST(123.45 AS DECIMAL(7, 2)) AS decimal_value, "
             "from_hex('FF00') AS binary_value, "
@@ -432,6 +434,8 @@ def test_external_links_arrow_stream_preserves_sql_types_and_values(workspace_cl
 
     table = pa.ipc.open_stream(response.content).read_all()
     assert table.schema.field("date_value").type == pa.date32()
+    assert table.schema.field("far_date_value").type == pa.date32()
+    assert table.schema.field("infinite_date_value").type == pa.date32()
     assert table.schema.field("timestamp_value").type == pa.timestamp("us")
     assert table.schema.field("decimal_value").type == pa.decimal128(7, 2)
     assert table.schema.field("binary_value").type == pa.binary()
@@ -440,6 +444,10 @@ def test_external_links_arrow_stream_preserves_sql_types_and_values(workspace_cl
     assert table.schema.field("struct_value").type == pa.struct([("label", pa.string())])
 
     assert table.column("date_value").to_pylist() == [date(2024, 1, 1)]
+    assert table.column("far_date_value").cast(pa.int32()).to_pylist() == [
+        date.max.toordinal() - date(1970, 1, 1).toordinal() + 1
+    ]
+    assert table.column("infinite_date_value").cast(pa.int32()).to_pylist() == [2**31 - 1]
     assert table.column("timestamp_value").to_pylist() == [datetime(2024, 1, 2, 3, 4, 5, 123456)]
     assert table.column("decimal_value").to_pylist() == [Decimal("123.45")]
     assert table.column("binary_value").to_pylist() == [b"\xff\x00"]
