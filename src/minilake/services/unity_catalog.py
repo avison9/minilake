@@ -388,11 +388,6 @@ async def delete_catalog(name: str) -> dict[str, str]:
             message=f"Catalog '{name}' not found",
             status_code=404,
         )
-    # Also drop this catalog's schemas, tables and volumes from in-memory state.
-    for registry in ("schemas", "tables", "external_tables", "volumes"):
-        for full_name in [k for k in _state[registry] if k.startswith(f"{name}.")]:
-            del _state[registry][full_name]
-
     pool = get_duckdb_pool()
     if pool:
         try:
@@ -400,6 +395,7 @@ async def delete_catalog(name: str) -> dict[str, str]:
         except Exception as e:
             logger.warning(f"Failed to detach catalog {name} in DuckDB: {e}")
 
+    _delete_catalog_children(name)
     del _state["catalogs"][name]
     return {"message": f"Catalog '{name}' deleted"}
 
@@ -517,15 +513,24 @@ async def delete_schema(full_name: str) -> dict[str, str]:
         except Exception as e:
             logger.warning(f"Failed to drop schema in DuckDB: {e}")
 
-    # Drop the schema's tables from both registries. Leaving external_tables behind kept
-    # the table queryable through delta_scan() after its schema was gone.
+    _delete_schema_children(full_name)
+    del _state["schemas"][full_name]
+    return {"message": f"Schema '{full_name}' deleted"}
+
+
+def _delete_catalog_children(name: str) -> None:
+    """Remove registered children after deleting their backing catalog."""
+    for registry in ("schemas", "tables", "external_tables", "volumes"):
+        for full_name in [k for k in _state[registry] if k.startswith(f"{name}.")]:
+            del _state[registry][full_name]
+
+
+def _delete_schema_children(full_name: str) -> None:
+    """Remove registered children after deleting their backing schema."""
     prefix = f"{full_name}."
     for registry in ("tables", "external_tables"):
         for table_name in [k for k in _state[registry] if k.startswith(prefix)]:
             del _state[registry][table_name]
-
-    del _state["schemas"][full_name]
-    return {"message": f"Schema '{full_name}' deleted"}
 
 
 # ============================================================================
