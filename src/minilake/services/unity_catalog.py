@@ -388,11 +388,6 @@ async def delete_catalog(name: str) -> dict[str, str]:
             message=f"Catalog '{name}' not found",
             status_code=404,
         )
-
-    volume_path = _get_volumes_dir() / name
-    if volume_path.exists():
-        shutil.rmtree(volume_path)
-
     pool = get_duckdb_pool()
     if pool:
         try:
@@ -400,7 +395,7 @@ async def delete_catalog(name: str) -> dict[str, str]:
         except Exception as e:
             logger.warning(f"Failed to detach catalog {name} in DuckDB: {e}")
 
-    _remove_child_records(name, ("schemas", "tables", "external_tables", "volumes", "functions"), "CATALOG")
+    _delete_catalog_children(name)
     del _state["catalogs"][name]
     return {"message": f"Catalog '{name}' deleted"}
 
@@ -507,14 +502,10 @@ async def delete_schema(full_name: str) -> dict[str, str]:
             status_code=404,
         )
 
-    cat, schema = full_name.split(".", 1)
-    volume_path = _get_volumes_dir() / cat / schema
-    if volume_path.exists():
-        shutil.rmtree(volume_path)
-
     # Delete from DuckDB
     pool = get_duckdb_pool()
     if pool:
+        cat, schema = full_name.split(".", 1)
         try:
             conn = await pool.get_uc_connection()
             async with await pool.get_uc_lock():
@@ -522,22 +513,41 @@ async def delete_schema(full_name: str) -> dict[str, str]:
         except Exception as e:
             logger.warning(f"Failed to drop schema in DuckDB: {e}")
 
-    # Drop every child registry as well as its direct and inherited grants.
-    _remove_child_records(full_name, ("tables", "external_tables", "volumes", "functions"), "SCHEMA")
+    _delete_schema_children(full_name)
     del _state["schemas"][full_name]
     return {"message": f"Schema '{full_name}' deleted"}
 
 
-def _remove_child_records(parent_name: str, registries: tuple[str, ...], parent_type: str) -> None:
-    """Remove UC registry entries and grants beneath a deleted catalog or schema."""
-    prefix = f"{parent_name}."
-    for registry in registries:
-        for full_name in [key for key in _state[registry] if key.startswith(prefix)]:
+def _delete_catalog_children(name: str) -> None:
+    """Remove registered children after deleting their backing catalog."""
+    volume_path = _get_volumes_dir() / name
+    if volume_path.exists():
+        shutil.rmtree(volume_path)
+
+    for registry in ("schemas", "tables", "external_tables", "volumes", "functions"):
+        for full_name in [k for k in _state[registry] if k.startswith(f"{name}.")]:
             del _state[registry][full_name]
 
     from minilake.services import grants
 
-    grants.delete_grants_for_parent(parent_name, parent_type)
+    grants.delete_grants_for_parent(name, "CATALOG")
+
+
+def _delete_schema_children(full_name: str) -> None:
+    """Remove registered children after deleting their backing schema."""
+    cat, schema = full_name.split(".", 1)
+    volume_path = _get_volumes_dir() / cat / schema
+    if volume_path.exists():
+        shutil.rmtree(volume_path)
+
+    prefix = f"{full_name}."
+    for registry in ("tables", "external_tables", "volumes", "functions"):
+        for table_name in [k for k in _state[registry] if k.startswith(prefix)]:
+            del _state[registry][table_name]
+
+    from minilake.services import grants
+
+    grants.delete_grants_for_parent(full_name, "SCHEMA")
 
 
 # ============================================================================

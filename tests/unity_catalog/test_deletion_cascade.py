@@ -85,7 +85,7 @@ def test_delete_schema_cascades_functions_volumes_and_grants(catalog_and_schema,
     _grant(workspace_client, SecurableType.VOLUME, volume_full_name, Privilege.READ_VOLUME)
     _grant(workspace_client, SecurableType.CATALOG, catalog.name, Privilege.USE_CATALOG)
 
-    workspace_client.schemas.delete(full_name=schema.full_name)
+    workspace_client.schemas.delete(full_name=schema.full_name, force=True)
 
     with pytest.raises(DatabricksError):
         workspace_client.functions.get(name=function_full_name)
@@ -154,7 +154,7 @@ def test_delete_catalog_cascades_functions_volumes_and_grants(workspace_client: 
     _grant(workspace_client, SecurableType.STORAGE_CREDENTIAL, catalog_name, Privilege.READ_FILES)
     _grant(workspace_client, SecurableType.EXTERNAL_LOCATION, catalog_name, Privilege.READ_FILES)
 
-    workspace_client.catalogs.delete(name=catalog_name)
+    workspace_client.catalogs.delete(name=catalog_name, force=True)
 
     with pytest.raises(DatabricksError):
         workspace_client.functions.get(name=function_full_name)
