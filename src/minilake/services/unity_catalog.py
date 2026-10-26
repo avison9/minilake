@@ -400,7 +400,7 @@ async def delete_catalog(name: str) -> dict[str, str]:
         except Exception as e:
             logger.warning(f"Failed to detach catalog {name} in DuckDB: {e}")
 
-    _remove_child_records(name, ("schemas", "tables", "external_tables", "volumes", "functions"))
+    _remove_child_records(name, ("schemas", "tables", "external_tables", "volumes", "functions"), "CATALOG")
     del _state["catalogs"][name]
     return {"message": f"Catalog '{name}' deleted"}
 
@@ -523,12 +523,12 @@ async def delete_schema(full_name: str) -> dict[str, str]:
             logger.warning(f"Failed to drop schema in DuckDB: {e}")
 
     # Drop every child registry as well as its direct and inherited grants.
-    _remove_child_records(full_name, ("tables", "external_tables", "volumes", "functions"))
+    _remove_child_records(full_name, ("tables", "external_tables", "volumes", "functions"), "SCHEMA")
     del _state["schemas"][full_name]
     return {"message": f"Schema '{full_name}' deleted"}
 
 
-def _remove_child_records(parent_name: str, registries: tuple[str, ...]) -> None:
+def _remove_child_records(parent_name: str, registries: tuple[str, ...], parent_type: str) -> None:
     """Remove UC registry entries and grants beneath a deleted catalog or schema."""
     prefix = f"{parent_name}."
     for registry in registries:
@@ -537,7 +537,7 @@ def _remove_child_records(parent_name: str, registries: tuple[str, ...]) -> None
 
     from minilake.services import grants
 
-    grants.delete_grants_for_parent(parent_name)
+    grants.delete_grants_for_parent(parent_name, parent_type)
 
 
 # ============================================================================

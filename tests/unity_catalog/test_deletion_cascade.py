@@ -151,6 +151,8 @@ def test_delete_catalog_cascades_functions_volumes_and_grants(workspace_client: 
     _grant(workspace_client, SecurableType.CATALOG, catalog_name, Privilege.USE_CATALOG)
     _grant(workspace_client, SecurableType.FUNCTION, function_full_name, Privilege.EXECUTE)
     _grant(workspace_client, SecurableType.VOLUME, volume_full_name, Privilege.READ_VOLUME)
+    _grant(workspace_client, SecurableType.STORAGE_CREDENTIAL, catalog_name, Privilege.READ_FILES)
+    _grant(workspace_client, SecurableType.EXTERNAL_LOCATION, catalog_name, Privilege.READ_FILES)
 
     workspace_client.catalogs.delete(name=catalog_name)
 
@@ -169,6 +171,10 @@ def test_delete_catalog_cascades_functions_volumes_and_grants(workspace_client: 
     ):
         permissions = workspace_client.grants.get(securable_type=securable_type, full_name=full_name)
         assert not permissions.privilege_assignments
+
+    for securable_type in (SecurableType.STORAGE_CREDENTIAL, SecurableType.EXTERNAL_LOCATION):
+        permissions = workspace_client.grants.get(securable_type=securable_type, full_name=catalog_name)
+        assert permissions.privilege_assignments
 
     workspace_client.catalogs.create(name=catalog_name)
     workspace_client.functions.create(function_info=_sql_function(function_name, catalog_name, schema_name))
