@@ -143,9 +143,7 @@ def test_relative_data_dir_supports_dbfs_and_files(tmp_path):
     base_url = f"http://127.0.0.1:{port}"
     dbfs_path = working_dir / "data" / "dbfs" / "hello"
     try:
-        dbfs_body = json.dumps(
-            {"path": "/hello", "contents": base64.b64encode(b"dbfs").decode("ascii")}
-        ).encode()
+        dbfs_body = json.dumps({"path": "/hello", "contents": base64.b64encode(b"dbfs").decode("ascii")}).encode()
         request = urllib.request.Request(
             f"{base_url}/api/2.0/dbfs/put",
             data=dbfs_body,
