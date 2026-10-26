@@ -102,9 +102,8 @@ def _record_statement(entry: Dict[str, Any]) -> None:
         if len(statements) <= limit:
             break
         stale = statements[statement_id]
-        if stale.get("raw_rows") or stale.get("raw_arrow_chunks") or stale.get("result"):
+        if stale.get("raw_rows") or stale.get("result"):
             stale["raw_rows"] = []
-            stale["raw_arrow_chunks"] = []
             stale["result"] = None
             stale["rows_evicted"] = True
         else:
