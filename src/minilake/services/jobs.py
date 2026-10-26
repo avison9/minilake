@@ -10,7 +10,6 @@ import asyncio
 import logging
 import re
 import time
-import traceback
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query, Request
@@ -190,6 +189,26 @@ async def delete_job(req: DeleteJobRequest) -> dict:
 # ============================================================================
 
 
+def _read_sql_task_file(sql_path, display_path: str) -> str:
+    """Read workspace SQL and report file and decoding failures."""
+    try:
+        if not sql_path.is_file():
+            raise DatabricksError(
+                error_code="INVALID_PARAMETER_VALUE",
+                message=f"Workspace SQL path '{display_path}' is not a file",
+                status_code=400,
+            )
+        return sql_path.read_text(encoding="utf-8")
+    except DatabricksError:
+        raise
+    except (OSError, UnicodeError) as e:
+        raise DatabricksError(
+            error_code="INVALID_PARAMETER_VALUE",
+            message=f"Unable to read workspace SQL file '{display_path}': {e}",
+            status_code=400,
+        ) from e
+
+
 def _resolve_sql_task_text(sql_task: SqlTask) -> str:
     """Return the SQL a sql_task should run, from whichever source it names.
 
@@ -211,22 +230,7 @@ def _resolve_sql_task_text(sql_task: SqlTask) -> str:
                 message=f"Workspace file '{sql_task.file.path}' not found",
                 status_code=404,
             )
-        try:
-            if not sql_path.is_file():
-                raise DatabricksError(
-                    error_code="INVALID_PARAMETER_VALUE",
-                    message=f"Workspace SQL path '{sql_task.file.path}' is not a file",
-                    status_code=400,
-                )
-            return sql_path.read_text(encoding="utf-8")
-        except DatabricksError:
-            raise
-        except (OSError, UnicodeError) as e:
-            raise DatabricksError(
-                error_code="INVALID_PARAMETER_VALUE",
-                message=f"Unable to read workspace SQL file '{sql_task.file.path}': {e}",
-                status_code=400,
-            ) from e
+        return _read_sql_task_file(sql_path, sql_task.file.path)
 
     if sql_task.query is not None:
         return saved_queries.resolve_query_text(sql_task.query.query_id)
@@ -561,6 +565,8 @@ async def _execute_run(run_id: int, argv: List[str]) -> None:
     try:
         await _execute_run_tasks(run_id, argv)
     except Exception as e:
+        import traceback
+
         diagnostic = traceback.format_exc()
         message = f"Run execution failed: {type(e).__name__}: {e}"
         logger.error("Run %s failed unexpectedly: %s", run_id, diagnostic)
