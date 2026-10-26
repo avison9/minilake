@@ -1,11 +1,86 @@
 """Resolve Unity Catalog volume URIs to their on-disk storage."""
 
+import shutil
 from pathlib import Path
 
 from minilake.config import settings
 from minilake.errors import DatabricksError
 
 _VOLUMES_PREFIX = "/Volumes"
+
+
+def _merge_legacy_volume(legacy_path: Path, volume_root: Path) -> bool:
+    """Move legacy Files/DBFS volume data into its UC volume directory.
+
+    Preflight the entire tree before moving anything. A conflicting path leaves
+    both copies untouched and stops startup with a message for the operator.
+    """
+    legacy_dbfs_root = settings.data_dir / "dbfs"
+    current = legacy_dbfs_root
+    if current.is_symlink():
+        raise RuntimeError(f"Cannot migrate legacy volume data through symlink {current}")
+    for part in legacy_path.relative_to(legacy_dbfs_root).parts:
+        current = current / part
+        if current.is_symlink():
+            raise RuntimeError(f"Cannot migrate legacy volume data through symlink {current}")
+
+    if not legacy_path.exists():
+        return False
+    if not legacy_path.is_dir():
+        raise RuntimeError(f"Cannot migrate legacy volume data at {legacy_path}: expected a directory")
+
+    def check(source: Path, destination: Path) -> None:
+        for child in source.iterdir():
+            target = destination / child.name
+            if child.is_symlink():
+                raise RuntimeError(f"Cannot migrate legacy volume data: symlink at {child}")
+            if target.exists() or target.is_symlink():
+                if not child.is_dir() or not target.is_dir() or target.is_symlink():
+                    raise RuntimeError(
+                        f"Cannot migrate legacy volume data: both legacy and current paths contain {target}"
+                    )
+            if child.is_dir():
+                check(child, target)
+
+    check(legacy_path, volume_root)
+
+    def move_contents(source: Path, destination: Path) -> None:
+        for child in source.iterdir():
+            target = destination / child.name
+            if child.is_dir():
+                target.mkdir(exist_ok=True)
+                move_contents(child, target)
+                child.rmdir()
+            else:
+                shutil.move(str(child), str(target))
+
+    move_contents(legacy_path, volume_root)
+    legacy_path.rmdir()
+    return True
+
+
+def migrate_legacy_volume_data() -> int:
+    """Migrate old `/Volumes` uploads for volumes with existing UC directories."""
+    volumes_root = (settings.data_dir / "volumes").resolve()
+    if not volumes_root.is_dir():
+        return 0
+
+    migrated = 0
+    for catalog_path in volumes_root.iterdir():
+        if catalog_path.is_symlink() or not catalog_path.is_dir():
+            continue
+        for schema_path in catalog_path.iterdir():
+            if schema_path.is_symlink() or not schema_path.is_dir():
+                continue
+            for volume_root in schema_path.iterdir():
+                if volume_root.is_symlink() or not volume_root.is_dir():
+                    continue
+                legacy_path = (
+                    settings.data_dir / "dbfs" / "Volumes" / catalog_path.name / schema_path.name / volume_root.name
+                )
+                if _merge_legacy_volume(legacy_path, volume_root):
+                    migrated += 1
+    return migrated
 
 
 def resolve_volume_path(path: str) -> Path | None:
@@ -52,4 +127,8 @@ def resolve_volume_path(path: str) -> Path | None:
     target = volume_root.joinpath(*parts[3:]).resolve()
     if target != volume_root and volume_root not in target.parents:
         raise DatabricksError(error_code="INVALID_REQUEST", message="Invalid path", status_code=400)
+    _merge_legacy_volume(
+        settings.data_dir / "dbfs" / "Volumes" / catalog_name / schema_name / volume_name,
+        volume_root,
+    )
     return target
