@@ -10,7 +10,6 @@ import base64
 import logging
 import os
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
@@ -74,6 +73,8 @@ def _b64_decode(data: str) -> bytes:
 
 def _write_file_without_overwrite(file_path: Path, content: bytes) -> None:
     """Publish a complete file atomically, failing if its destination exists."""
+    import tempfile
+
     fd, temporary_path = tempfile.mkstemp(prefix=".minilake-upload-", dir=file_path.parent)
     committed = False
     try:
