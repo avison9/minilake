@@ -189,6 +189,11 @@ async def delete_job(req: DeleteJobRequest) -> dict:
 # ============================================================================
 
 
+def _read_sql_task_file(sql_path, display_path: str) -> str:
+    """Read workspace SQL independently of saved-query namespace selection."""
+    return sql_path.read_text()
+
+
 def _resolve_sql_task_text(sql_task: SqlTask) -> str:
     """Return the SQL a sql_task should run, from whichever source it names.
 
@@ -210,7 +215,7 @@ def _resolve_sql_task_text(sql_task: SqlTask) -> str:
                 message=f"Workspace file '{sql_task.file.path}' not found",
                 status_code=404,
             )
-        return sql_path.read_text()
+        return _read_sql_task_file(sql_path, sql_task.file.path)
 
     if sql_task.query is not None:
         return saved_queries.resolve_query_text(sql_task.query.query_id)
