@@ -516,16 +516,7 @@ async def delete_catalog(name: str, force: bool = Query(False)) -> dict[str, str
     elif not force and _catalog_has_registered_children(name):
         raise _not_empty_error("catalog", name)
 
-    volume_path = _get_volumes_dir() / name
-    if volume_path.exists():
-        shutil.rmtree(volume_path)
-
-    # Remove all of the catalog's registered children only after the physical catalog
-    # has been detached successfully.
-    for registry in ("schemas", "tables", "external_tables", "volumes", "functions"):
-        for full_name in [k for k in _state[registry] if k.startswith(f"{name}.")]:
-            del _state[registry][full_name]
-
+    _delete_catalog_children(name)
     del _state["catalogs"][name]
     return {"message": f"Catalog '{name}' deleted"}
 
@@ -658,18 +649,33 @@ async def delete_schema(full_name: str, force: bool = Query(False)) -> dict[str,
     elif not force and _schema_has_registered_children(cat, schema):
         raise _not_empty_error("schema", full_name)
 
+    _delete_schema_children(full_name)
+    del _state["schemas"][full_name]
+    return {"message": f"Schema '{full_name}' deleted"}
+
+
+def _delete_catalog_children(name: str) -> None:
+    """Remove registered children after deleting their backing catalog."""
+    volume_path = _get_volumes_dir() / name
+    if volume_path.exists():
+        shutil.rmtree(volume_path)
+
+    for registry in ("schemas", "tables", "external_tables", "volumes", "functions"):
+        for full_name in [k for k in _state[registry] if k.startswith(f"{name}.")]:
+            del _state[registry][full_name]
+
+
+def _delete_schema_children(full_name: str) -> None:
+    """Remove registered children after deleting their backing schema."""
+    cat, schema = full_name.split(".", 1)
     volume_path = _get_volumes_dir() / cat / schema
     if volume_path.exists():
         shutil.rmtree(volume_path)
 
-    # Drop all child metadata after the backing schema was deleted successfully.
     prefix = f"{full_name}."
     for registry in ("tables", "external_tables", "volumes", "functions"):
         for table_name in [k for k in _state[registry] if k.startswith(prefix)]:
             del _state[registry][table_name]
-
-    del _state["schemas"][full_name]
-    return {"message": f"Schema '{full_name}' deleted"}
 
 
 # ============================================================================
