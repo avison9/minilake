@@ -13,6 +13,7 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.compute import ClusterSpec
 from databricks.sdk.service.jobs import (
+    JobSettings,
     NotebookTask,
     RunIf,
     SparkPythonTask,
@@ -69,6 +70,48 @@ def test_job_list_includes_created(workspace_client: WorkspaceClient):
     assert job.job_id in job_ids
 
     print(f"✓ Job {job.job_id} appears in job list")
+
+
+@pytest.mark.crud
+@pytest.mark.parametrize(
+    "new_settings",
+    [
+        JobSettings(tags={"team": "qa"}),
+        JobSettings(timeout_seconds=600),
+        JobSettings(),
+    ],
+    ids=["tags-only", "timeout-only", "empty"],
+)
+def test_job_partial_update_keeps_omitted_fields(workspace_client: WorkspaceClient, new_settings: JobSettings):
+    """Test: jobs/update only changes the fields it sends; the name and tasks survive."""
+    job = workspace_client.jobs.create(
+        name="valuable name",
+        tasks=[Task(task_key="main", notebook_task=NotebookTask(notebook_path="/Shared/nb"))],
+    )
+
+    workspace_client.jobs.update(job_id=job.job_id, new_settings=new_settings)
+
+    settings = workspace_client.jobs.get(job_id=job.job_id).settings
+    assert settings.name == "valuable name"
+    assert [t.task_key for t in settings.tasks] == ["main"]
+    if new_settings.tags is not None:
+        assert settings.tags == new_settings.tags
+    if new_settings.timeout_seconds is not None:
+        assert settings.timeout_seconds == new_settings.timeout_seconds
+
+    print(f"✓ Partial update kept name and tasks of job {job.job_id}")
+
+
+@pytest.mark.crud
+def test_job_update_with_name_renames(workspace_client: WorkspaceClient):
+    """Test: a name sent in jobs/update still replaces the stored one."""
+    job = workspace_client.jobs.create(name="old name", tasks=[])
+
+    workspace_client.jobs.update(job_id=job.job_id, new_settings=JobSettings(name="new name"))
+
+    assert workspace_client.jobs.get(job_id=job.job_id).settings.name == "new name"
+
+    print(f"✓ Job {job.job_id} renamed via update")
 
 
 @pytest.mark.crud
