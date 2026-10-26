@@ -431,6 +431,7 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                 else:
                     i += 1
         elif sql[i] == "'":
+            start = i
             backslash_escapes = i > 0 and sql[i - 1] in "eE" and (i == 1 or not _is_duckdb_identifier_char(sql[i - 2]))
             i, closed = _scan_quoted_token(sql, i, "'", backslash_escapes)
             if backslash_escapes and closed:
@@ -441,9 +442,12 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                     i, closed = _scan_quoted_token(sql, continuation, "'", backslash_escapes=True)
                     if not closed:
                         break
+            tokens.append((start, i, "literal", sql[start:i]))
         elif sql[i] == "$" and (dollar_quote := _dollar_quote_delimiter(sql, i)):
+            start = i
             end = sql.find(dollar_quote, i + len(dollar_quote))
             i = len(sql) if end == -1 else end + len(dollar_quote)
+            tokens.append((start, i, "literal", sql[start:i]))
         elif sql[i] in '"`':
             start = i
             quote = sql[i]
@@ -524,13 +528,15 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
         if kind == "symbol" and value == "(":
             # Parentheses can wrap either a relation or a nested query.
             relation_group = scope["expect_relation"]
+            next_token = tokens[token_index + 1] if token_index + 1 < len(tokens) else None
+            from_first_query = bool(next_token and next_token[2] == "word" and next_token[3].upper() == "FROM")
             scope["expect_relation"] = False
             scopes.append(
                 {
                     "in_from": relation_group,
                     "expect_relation": relation_group,
                     "query_started": False,
-                    "allow_bare_from": False,
+                    "allow_bare_from": from_first_query,
                 }
             )
             token_index += 1
@@ -555,6 +561,20 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
             )
             token_index += 1
             continue
+
+        # A qualified relation can start with a word that is also a clause
+        # keyword, such as the catalog name `values`.
+        if scope["expect_relation"] and kind in ("word", "quoted_identifier"):
+            external_name = external_name_at(token_index)
+            if external_name is not None:
+                full_name, last_token_index = external_name
+                external = external_tables.get(full_name)
+                if external:
+                    storage_location = external["storage_location"].replace("'", "''")
+                    replacements.append((start, tokens[last_token_index][1], f"delta_scan('{storage_location}')"))
+                token_index = last_token_index + 1
+                scope["expect_relation"] = False
+                continue
 
         if kind == "word":
             keyword = value.upper()
@@ -584,9 +604,13 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                     scope["expect_relation"] = True
                 token_index += 1
                 continue
-            if not is_qualified_part and keyword == "PIVOT" and not scope["in_from"] and not scope["query_started"]:
-                # DuckDB also accepts a standalone PIVOT query whose input is a
-                # table reference rather than a FROM/JOIN relation.
+            if (
+                not is_qualified_part
+                and keyword in {"PIVOT", "PIVOT_WIDER", "UNPIVOT"}
+                and not scope["query_started"]
+                and (not scope["in_from"] or scope["expect_relation"])
+            ):
+                # These query forms can use a table as their direct input.
                 scope["in_from"] = True
                 scope["expect_relation"] = True
                 scope["query_started"] = True
@@ -609,25 +633,8 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                 token_index += 1
                 continue
 
-        if scope["expect_relation"] and kind in ("word", "quoted_identifier"):
-            external_name = external_name_at(token_index)
-            if external_name is not None:
-                full_name, last_token_index = external_name
-                external = external_tables.get(full_name)
-                if external:
-                    storage_location = external["storage_location"].replace("'", "''")
-                    replacements.append(
-                        (
-                            start,
-                            tokens[last_token_index][1],
-                            f"delta_scan('{storage_location}')",
-                        )
-                    )
-                token_index = last_token_index + 1
-            else:
-                token_index += 1
+        if scope["expect_relation"] and kind in ("word", "quoted_identifier", "literal"):
             scope["expect_relation"] = False
-            continue
 
         token_index += 1
 

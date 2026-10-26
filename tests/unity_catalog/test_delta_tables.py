@@ -8,6 +8,7 @@ The test process shares the same `/data` volume as the minilake server (see
 docker-compose.test.yml), so files written here are immediately visible to it.
 """
 
+import os
 from uuid import uuid4
 
 import pandas as pd
@@ -115,7 +116,7 @@ def test_external_delta_table_read_via_sql(delta_catalog_and_schema, workspace_c
     """Register an EXTERNAL Delta table, write real Delta data, query it via SQL."""
     cat, schema = delta_catalog_and_schema
     table_name = f"people_{uuid4().hex[:6]}"
-    storage_location = f"/data/delta/{cat.name}/{schema.name}/{table_name}"
+    storage_location = f"{os.environ.get('MINILAKE_DATA_DIR', '/data')}/delta/{cat.name}/{schema.name}/{table_name}"
 
     table = workspace_client.tables.create(
         name=table_name,
@@ -139,6 +140,21 @@ def test_external_delta_table_read_via_sql(delta_catalog_and_schema, workspace_c
 
     assert result.status.state.value == "SUCCEEDED"
     assert result.result.data_array == [[1, "Alice"], [2, "Bob"], [3, "Charlie"]]
+
+    # Exercise relation forms through the HTTP SQL API with actual Delta files.
+    for statement, expected in (
+        (f"SELECT '{table.full_name}', $${table.full_name}$$", [[table.full_name, table.full_name]]),
+        (f"WITH x AS (FROM {table.full_name}) SELECT count(*) FROM x", [[3]]),
+        (f"SELECT (FROM {table.full_name} SELECT max(id))", [[3]]),
+        (f"SELECT count(*) FROM (PIVOT {table.full_name} ON name USING sum(id)) p", [[1]]),
+        (f"SELECT count(*) FROM (PIVOT_WIDER {table.full_name} ON name USING sum(id)) p", [[1]]),
+        (f"SELECT count(*) FROM (UNPIVOT {table.full_name} ON id INTO NAME field VALUE amount) p", [[3]]),
+    ):
+        response = workspace_client.statement_execution.execute_statement(
+            warehouse_id=warehouse.id, statement=statement
+        )
+        assert response.status.state.value == "SUCCEEDED", (statement, response.status)
+        assert response.result.data_array == expected
 
     print(f"✓ Real Delta table written externally and read via minilake SQL: {table.full_name}")
 

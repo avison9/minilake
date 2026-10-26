@@ -168,9 +168,49 @@ def test_backtick_identifier_after_unicode_typed_literal(workspace_client: Works
             id="unreserved-keyword-catalog",
         ),
         pytest.param(
+            "SELECT * FROM values.default.external",
+            "SELECT * FROM delta_scan('/data/values')",
+            id="values-keyword-catalog",
+        ),
+        pytest.param(
+            "WITH x AS (FROM rewrite.default.external) SELECT * FROM x",
+            "WITH x AS (FROM delta_scan('/data/external''s')) SELECT * FROM x",
+            id="cte-from-first",
+        ),
+        pytest.param(
+            "SELECT (FROM rewrite.default.external SELECT max(id))",
+            "SELECT (FROM delta_scan('/data/external''s') SELECT max(id))",
+            id="scalar-subquery-from-first",
+        ),
+        pytest.param(
+            "SELECT substring('abcdef' FROM rewrite.default.external)",
+            "SELECT substring('abcdef' FROM rewrite.default.external)",
+            id="substring-from-expression",
+        ),
+        pytest.param(
+            "SELECT substring($$abcdef$$ FROM rewrite.default.external)",
+            "SELECT substring($$abcdef$$ FROM rewrite.default.external)",
+            id="substring-dollar-string-from-expression",
+        ),
+        pytest.param(
             "PIVOT rewrite.default.external ON category USING sum(id)",
             "PIVOT delta_scan('/data/external''s') ON category USING sum(id)",
             id="standalone-pivot-source",
+        ),
+        pytest.param(
+            "SELECT * FROM (PIVOT rewrite.default.external ON category USING sum(id)) p",
+            "SELECT * FROM (PIVOT delta_scan('/data/external''s') ON category USING sum(id)) p",
+            id="nested-pivot-source",
+        ),
+        pytest.param(
+            "PIVOT_WIDER rewrite.default.external ON category USING sum(id)",
+            "PIVOT_WIDER delta_scan('/data/external''s') ON category USING sum(id)",
+            id="pivot-wider-source",
+        ),
+        pytest.param(
+            "UNPIVOT rewrite.default.external ON id INTO NAME field VALUE amount",
+            "UNPIVOT delta_scan('/data/external''s') ON id INTO NAME field VALUE amount",
+            id="unpivot-source",
         ),
         pytest.param(
             "SELECT extract(year FROM rewrite.default.external)",
@@ -197,6 +237,7 @@ def test_external_table_rewrite_preserves_sql_context(monkeypatch, statement, ex
         {
             "rewrite.default.external": {"storage_location": "/data/external's"},
             "set.default.external": {"storage_location": "/data/set"},
+            "values.default.external": {"storage_location": "/data/values"},
         },
     )
 
