@@ -127,8 +127,4 @@ def resolve_volume_path(path: str) -> Path | None:
     target = volume_root.joinpath(*parts[3:]).resolve()
     if target != volume_root and volume_root not in target.parents:
         raise DatabricksError(error_code="INVALID_REQUEST", message="Invalid path", status_code=400)
-    _merge_legacy_volume(
-        settings.data_dir / "dbfs" / "Volumes" / catalog_name / schema_name / volume_name,
-        volume_root,
-    )
     return target
