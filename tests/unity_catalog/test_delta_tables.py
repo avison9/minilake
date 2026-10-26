@@ -13,7 +13,6 @@ from uuid import uuid4
 import pandas as pd
 import pytest
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import BadRequest
 from databricks.sdk.service.catalog import ColumnInfo, DataSourceFormat, TableType
 from deltalake import write_deltalake
 
@@ -148,6 +147,8 @@ def test_create_table_using_delta_location_with_comment_registers_external(
 def test_unsupported_replace_external_ddl_preserves_existing_table(
     delta_catalog_and_schema, workspace_client: WorkspaceClient
 ):
+    from databricks.sdk.errors import BadRequest
+
     """An unclassified external-table declaration must not erase a managed table."""
     cat, schema = delta_catalog_and_schema
     table_name = f"replace_guard_{uuid4().hex[:6]}"
