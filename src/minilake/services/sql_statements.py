@@ -490,7 +490,14 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
         return ".".join(parts), cursor
 
     replacements = []
-    scopes = [{"in_from": False, "expect_relation": False}]
+    scopes = [
+        {
+            "in_from": False,
+            "expect_relation": False,
+            "query_started": False,
+            "allow_bare_from": True,
+        }
+    ]
     relation_modifiers = {"LATERAL", "ONLY"}
     clause_ends = {
         "EXCEPT",
@@ -500,14 +507,10 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
         "INTERSECT",
         "LIMIT",
         "OFFSET",
-        "ON",
         "ORDER",
         "QUALIFY",
         "RETURNING",
-        "SELECT",
-        "SET",
         "UNION",
-        "USING",
         "VALUES",
         "WHERE",
         "WINDOW",
@@ -522,7 +525,14 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
             # Parentheses can wrap either a relation or a nested query.
             relation_group = scope["expect_relation"]
             scope["expect_relation"] = False
-            scopes.append({"in_from": relation_group, "expect_relation": relation_group})
+            scopes.append(
+                {
+                    "in_from": relation_group,
+                    "expect_relation": relation_group,
+                    "query_started": False,
+                    "allow_bare_from": False,
+                }
+            )
             token_index += 1
             continue
         if kind == "symbol" and value == ")":
@@ -536,17 +546,63 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                 scope["expect_relation"] = True
             token_index += 1
             continue
+        if kind == "symbol" and value == ";":
+            scope.update(
+                in_from=False,
+                expect_relation=False,
+                query_started=False,
+                allow_bare_from=True,
+            )
+            token_index += 1
+            continue
 
         if kind == "word":
             keyword = value.upper()
-            if keyword in {"FROM", "JOIN"}:
-                scope["in_from"] = True
-                scope["expect_relation"] = True
-                token_index += 1
-                continue
-            if keyword in clause_ends:
+            is_qualified_part = token_index > 0 and tokens[token_index - 1][2:] == ("symbol", ".")
+            previous_words = [
+                token[3].upper() if token[2] == "word" else None
+                for token in tokens[max(0, token_index - 3) : token_index]
+            ]
+            is_distinct_from = (
+                keyword == "FROM"
+                and len(previous_words) >= 2
+                and previous_words[-1] == "DISTINCT"
+                and previous_words[-2] in {"IS", "NOT"}
+                and (previous_words[-2] != "NOT" or (len(previous_words) >= 3 and previous_words[-3] == "IS"))
+            )
+
+            if not is_qualified_part and keyword == "SELECT":
+                scope["query_started"] = True
+                scope["allow_bare_from"] = False
                 scope["in_from"] = False
                 scope["expect_relation"] = False
+                token_index += 1
+                continue
+            if not is_qualified_part and keyword in {"FROM", "JOIN"}:
+                if keyword == "JOIN" or (not is_distinct_from and (scope["query_started"] or scope["allow_bare_from"])):
+                    scope["in_from"] = True
+                    scope["expect_relation"] = True
+                token_index += 1
+                continue
+            if not is_qualified_part and keyword == "PIVOT" and not scope["in_from"] and not scope["query_started"]:
+                # DuckDB also accepts a standalone PIVOT query whose input is a
+                # table reference rather than a FROM/JOIN relation.
+                scope["in_from"] = True
+                scope["expect_relation"] = True
+                scope["query_started"] = True
+                scope["allow_bare_from"] = False
+                token_index += 1
+                continue
+            if not is_qualified_part and keyword in {"ON", "USING"}:
+                # These begin join/pivot conditions, but the surrounding FROM
+                # list remains active so a following comma can add a relation.
+                scope["expect_relation"] = False
+                token_index += 1
+                continue
+            if not is_qualified_part and not is_distinct_from and keyword in clause_ends:
+                scope["in_from"] = False
+                scope["expect_relation"] = False
+                scope["allow_bare_from"] = False
                 token_index += 1
                 continue
             if scope["expect_relation"] and keyword in relation_modifiers:

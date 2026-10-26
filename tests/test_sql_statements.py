@@ -11,6 +11,9 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.catalog import DataSourceFormat, TableType
 from databricks.sdk.service.sql import ColumnInfo, Disposition, Format
 
+from minilake.services import sql_statements as sql_service
+from minilake.services import unity_catalog
+
 
 @pytest.mark.crud
 @pytest.mark.parametrize(
@@ -109,6 +112,95 @@ def test_backtick_identifier_after_unicode_typed_literal(workspace_client: Works
     assert response.status.state.value == "SUCCEEDED"
     assert response.result.data_array == [["path\\"]]
     assert response.manifest.schema.columns[0].name == "value"
+
+
+@pytest.mark.parametrize(
+    "statement, expected",
+    [
+        pytest.param(
+            "SELECT 'rewrite.default.external' AS value",
+            "SELECT 'rewrite.default.external' AS value",
+            id="single-quoted-string",
+        ),
+        pytest.param(
+            "SELECT $$rewrite.default.external$$ AS value",
+            "SELECT $$rewrite.default.external$$ AS value",
+            id="dollar-quoted-string",
+        ),
+        pytest.param(
+            r"SELECT E'it\'s rewrite.default.external' AS value",
+            r"SELECT E'it\'s rewrite.default.external' AS value",
+            id="escaped-string",
+        ),
+        pytest.param(
+            'SELECT 1 AS "rewrite.default.external"',
+            'SELECT 1 AS "rewrite.default.external"',
+            id="quoted-alias",
+        ),
+        pytest.param(
+            "SELECT 1 /* rewrite.default.external */ -- rewrite.default.external\n",
+            "SELECT 1 /* rewrite.default.external */ -- rewrite.default.external\n",
+            id="comments",
+        ),
+        pytest.param(
+            "SELECT * FROM rewrite.default.external",
+            "SELECT * FROM delta_scan('/data/external''s')",
+            id="from-relation-and-escaped-storage-path",
+        ),
+        pytest.param(
+            'SELECT * FROM "rewrite"."default"."external"',
+            "SELECT * FROM delta_scan('/data/external''s')",
+            id="quoted-from-relation",
+        ),
+        pytest.param(
+            "SELECT * FROM (SELECT 1 AS a) x JOIN (SELECT 2 AS b) y ON true, rewrite.default.external",
+            "SELECT * FROM (SELECT 1 AS a) x JOIN (SELECT 2 AS b) y ON true, delta_scan('/data/external''s')",
+            id="comma-relation-after-join-on",
+        ),
+        pytest.param(
+            "SELECT * FROM (SELECT 1 AS a) x JOIN (SELECT 1 AS a) y USING (a), rewrite.default.external",
+            "SELECT * FROM (SELECT 1 AS a) x JOIN (SELECT 1 AS a) y USING (a), delta_scan('/data/external''s')",
+            id="comma-relation-after-join-using",
+        ),
+        pytest.param(
+            "SELECT * FROM set.default.external",
+            "SELECT * FROM delta_scan('/data/set')",
+            id="unreserved-keyword-catalog",
+        ),
+        pytest.param(
+            "PIVOT rewrite.default.external ON category USING sum(id)",
+            "PIVOT delta_scan('/data/external''s') ON category USING sum(id)",
+            id="standalone-pivot-source",
+        ),
+        pytest.param(
+            "SELECT extract(year FROM rewrite.default.external)",
+            "SELECT extract(year FROM rewrite.default.external)",
+            id="extract-from-expression",
+        ),
+        pytest.param(
+            "SELECT 0 IS DISTINCT FROM rewrite.default.external",
+            "SELECT 0 IS DISTINCT FROM rewrite.default.external",
+            id="distinct-from-expression",
+        ),
+        pytest.param(
+            "SELECT s.from, rewrite.default.external FROM (SELECT {'from': 1} AS s)",
+            "SELECT s.from, rewrite.default.external FROM (SELECT {'from': 1} AS s)",
+            id="qualified-field-named-from",
+        ),
+    ],
+)
+def test_external_table_rewrite_preserves_sql_context(monkeypatch, statement, expected):
+    """Only external table relation names are rewritten, with safe path quoting."""
+    monkeypatch.setitem(
+        unity_catalog._state,
+        "external_tables",
+        {
+            "rewrite.default.external": {"storage_location": "/data/external's"},
+            "set.default.external": {"storage_location": "/data/set"},
+        },
+    )
+
+    assert sql_service._rewrite_sql_for_duckdb(statement) == expected
 
 
 @pytest.fixture
