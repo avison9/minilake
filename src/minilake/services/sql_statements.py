@@ -529,7 +529,9 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
             # Parentheses can wrap either a relation or a nested query.
             relation_group = scope["expect_relation"]
             next_token = tokens[token_index + 1] if token_index + 1 < len(tokens) else None
-            from_first_query = bool(next_token and next_token[2] == "word" and next_token[3].upper() == "FROM")
+            from_first_query = bool(
+                next_token and next_token[2] == "word" and next_token[3].upper() in {"FROM", "WITH"}
+            )
             scope["expect_relation"] = False
             scopes.append(
                 {
@@ -621,6 +623,15 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
                 # These begin join/pivot conditions, but the surrounding FROM
                 # list remains active so a following comma can add a relation.
                 scope["expect_relation"] = False
+                token_index += 1
+                continue
+            if not is_qualified_part and keyword in {"UNION", "INTERSECT", "EXCEPT"}:
+                # The next operand begins a new query at the same nesting level.
+                scope.update(in_from=False, expect_relation=False, query_started=False, allow_bare_from=True)
+                token_index += 1
+                continue
+            if not is_qualified_part and keyword == "VALUES" and scope["in_from"] and not scope["expect_relation"]:
+                # VALUES is permitted as an unquoted table alias in DuckDB.
                 token_index += 1
                 continue
             if not is_qualified_part and not is_distinct_from and keyword in clause_ends:

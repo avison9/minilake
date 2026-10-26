@@ -145,10 +145,34 @@ def test_external_delta_table_read_via_sql(delta_catalog_and_schema, workspace_c
     for statement, expected in (
         (f"SELECT '{table.full_name}', $${table.full_name}$$", [[table.full_name, table.full_name]]),
         (f"WITH x AS (FROM {table.full_name}) SELECT count(*) FROM x", [[3]]),
+        (f"WITH x AS (WITH y AS (SELECT 1) FROM {table.full_name}) SELECT count(*) FROM x", [[3]]),
         (f"SELECT (FROM {table.full_name} SELECT max(id))", [[3]]),
+        (f"SELECT (WITH y AS (SELECT 1) FROM {table.full_name} SELECT max(id))", [[3]]),
+        (f"SELECT count(*) FROM (SELECT 1 AS n) AS values, {table.full_name}", [[3]]),
+        (f"SELECT count(*) FROM (SELECT 1 AS n) values, {table.full_name}", [[3]]),
         (f"SELECT count(*) FROM (PIVOT {table.full_name} ON name USING sum(id)) p", [[1]]),
         (f"SELECT count(*) FROM (PIVOT_WIDER {table.full_name} ON name USING sum(id)) p", [[1]]),
         (f"SELECT count(*) FROM (UNPIVOT {table.full_name} ON id INTO NAME field VALUE amount) p", [[3]]),
+        (
+            f"SELECT count(*) FROM (SELECT 0 AS Alice, 0 AS Bob, 0 AS Charlie "
+            f"UNION ALL PIVOT {table.full_name} ON name USING sum(id)) p",
+            [[2]],
+        ),
+        (
+            f"SELECT count(*) FROM (SELECT 0 AS Alice, 0 AS Bob, 0 AS Charlie "
+            f"INTERSECT PIVOT {table.full_name} ON name USING sum(id)) p",
+            [[0]],
+        ),
+        (
+            f"SELECT count(*) FROM (SELECT 0 AS Alice, 0 AS Bob, 0 AS Charlie "
+            f"EXCEPT PIVOT {table.full_name} ON name USING sum(id)) p",
+            [[1]],
+        ),
+        (
+            f"SELECT count(*) FROM (SELECT 'Alice' AS name, 'id' AS field, 0 AS amount "
+            f"UNION ALL UNPIVOT {table.full_name} ON id INTO NAME field VALUE amount) p",
+            [[4]],
+        ),
     ):
         response = workspace_client.statement_execution.execute_statement(
             warehouse_id=warehouse.id, statement=statement
