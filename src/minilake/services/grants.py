@@ -101,6 +101,15 @@ def _assignments(key: Tuple[str, Optional[str]]) -> Dict[str, List[str]]:
     return _state["grants"].get(key, {})
 
 
+def delete_grants_for_parent(parent_name: str) -> None:
+    """Remove direct grants on a UC object and every registered descendant."""
+    prefix = f"{parent_name}."
+    for key in list(_state["grants"]):
+        full_name = key[1]
+        if full_name == parent_name or (full_name is not None and full_name.startswith(prefix)):
+            del _state["grants"][key]
+
+
 @router.get("/permissions/{securable_type}/{full_name}", response_model=GetPermissionsResponse)
 async def get_permissions(
     securable_type: str,
