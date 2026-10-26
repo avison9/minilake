@@ -43,7 +43,7 @@ _state: Dict[str, Any] = {
 def _dbfs_root() -> Path:
     root = settings.data_dir / "dbfs"
     root.mkdir(parents=True, exist_ok=True)
-    return root
+    return root.resolve()
 
 
 def _normalize(path: str) -> str:
@@ -56,7 +56,7 @@ def _normalize(path: str) -> str:
 
 def _resolve(path: str) -> Path:
     normalized = _normalize(path)
-    root = _dbfs_root().resolve()
+    root = _dbfs_root()
     resolved = (root / normalized.lstrip("/")).resolve()
     if resolved != root and root not in resolved.parents:
         raise DatabricksError(error_code="INVALID_REQUEST", message="Invalid path", status_code=400)
