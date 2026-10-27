@@ -1,5 +1,6 @@
 """SQL Statement Execution API endpoints."""
 
+import base64
 import csv
 import io
 import json
@@ -551,21 +552,280 @@ def _rewrite_sql_for_duckdb(sql: str) -> str:
     if not external_tables:
         return sql
 
-    def replace_qualified_name(match):
-        catalog = match.group(1)
-        schema = match.group(2)
-        table = match.group(3)
-        full_name = f"{catalog}.{schema}.{table}"
+    # Tokenize executable SQL while skipping literals and comments. Quoted
+    # identifiers stay as tokens so fully quoted table names still work, but
+    # can never be mistaken for keywords such as FROM or JOIN.
+    tokens = []
+    i = 0
+    while i < len(sql):
+        if _is_duckdb_space(sql[i]):
+            i += 1
+        elif sql.startswith("--", i):
+            while i < len(sql) and sql[i] not in "\r\n":
+                i += 1
+        elif sql.startswith("/*", i):
+            depth = 1
+            i += 2
+            while i < len(sql) and depth:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+        elif sql[i] == "'":
+            start = i
+            backslash_escapes = i > 0 and sql[i - 1] in "eE" and (i == 1 or not _is_duckdb_identifier_char(sql[i - 2]))
+            i, closed = _scan_quoted_token(sql, i, "'", backslash_escapes)
+            if backslash_escapes and closed:
+                while True:
+                    continuation = _skip_string_continuation_whitespace(sql, i)
+                    if continuation is None or continuation >= len(sql) or sql[continuation] != "'":
+                        break
+                    i, closed = _scan_quoted_token(sql, continuation, "'", backslash_escapes=True)
+                    if not closed:
+                        break
+            tokens.append((start, i, "literal", sql[start:i]))
+        elif sql[i] == "$" and (dollar_quote := _dollar_quote_delimiter(sql, i)):
+            start = i
+            end = sql.find(dollar_quote, i + len(dollar_quote))
+            i = len(sql) if end == -1 else end + len(dollar_quote)
+            tokens.append((start, i, "literal", sql[start:i]))
+        elif sql[i] in '"`':
+            start = i
+            quote = sql[i]
+            i, closed = _scan_quoted_token(sql, i, quote)
+            raw = sql[start + 1 : i - 1] if closed else sql[start + 1 : i]
+            value = raw.replace(quote * 2, quote)
+            tokens.append((start, i, "quoted_identifier", value))
+        elif _is_duckdb_identifier_char(sql[i]):
+            start = i
+            while i < len(sql) and _is_duckdb_identifier_char(sql[i]):
+                i += 1
+            tokens.append((start, i, "word", sql[start:i]))
+        else:
+            tokens.append((i, i + 1, "symbol", sql[i]))
+            i += 1
 
-        external = external_tables.get(full_name)
-        if external:
-            storage_location = external["storage_location"]
-            return f"delta_scan('{storage_location}')"
+    def external_name_at(token_index):
+        """Return (name, end-token-index) for a contiguous three-part identifier."""
+        parts = []
+        cursor = token_index
+        for part_index in range(3):
+            if cursor >= len(tokens) or tokens[cursor][2] not in ("word", "quoted_identifier"):
+                return None
+            parts.append(tokens[cursor][3])
+            if part_index < 2:
+                dot_index = cursor + 1
+                next_part_index = cursor + 2
+                if (
+                    next_part_index >= len(tokens)
+                    or tokens[dot_index][2:] != ("symbol", ".")
+                    or tokens[cursor][1] != tokens[dot_index][0]
+                    or tokens[dot_index][1] != tokens[next_part_index][0]
+                ):
+                    return None
+                cursor = next_part_index
 
-        return match.group(0)
+        next_index = cursor + 1
+        if (
+            next_index < len(tokens)
+            and tokens[next_index][2:] == ("symbol", ".")
+            and tokens[cursor][1] == tokens[next_index][0]
+        ):
+            return None
+        return ".".join(parts), cursor
 
-    # Match patterns like "catalog"."schema"."table" or catalog.schema.table
-    sql = re.sub(r'"?(\w+)"?\."?(\w+)"?\."?(\w+)"?', replace_qualified_name, sql)
+    replacements = []
+    scopes = [
+        {
+            "in_from": False,
+            "expect_relation": False,
+            "query_started": False,
+            "allow_bare_from": True,
+            "write_kind": None,
+            "write_source_pending": False,
+        }
+    ]
+    relation_modifiers = {"LATERAL", "ONLY"}
+    clause_ends = {
+        "EXCEPT",
+        "FETCH",
+        "GROUP",
+        "HAVING",
+        "INTERSECT",
+        "LIMIT",
+        "OFFSET",
+        "ORDER",
+        "QUALIFY",
+        "RETURNING",
+        "UNION",
+        "VALUES",
+        "WHERE",
+        "WINDOW",
+    }
+
+    token_index = 0
+    while token_index < len(tokens):
+        start, _end, kind, value = tokens[token_index]
+        scope = scopes[-1]
+
+        if kind == "symbol" and value == "(":
+            # Parentheses can wrap either a relation or a nested query.
+            relation_group = scope["expect_relation"]
+            next_token = tokens[token_index + 1] if token_index + 1 < len(tokens) else None
+            from_first_query = bool(
+                next_token and next_token[2] == "word" and next_token[3].upper() in {"FROM", "WITH"}
+            )
+            scope["expect_relation"] = False
+            scopes.append(
+                {
+                    "in_from": relation_group,
+                    "expect_relation": relation_group,
+                    "query_started": False,
+                    "allow_bare_from": from_first_query,
+                    "write_kind": None,
+                    "write_source_pending": False,
+                }
+            )
+            token_index += 1
+            continue
+        if kind == "symbol" and value == ")":
+            if len(scopes) > 1:
+                scopes.pop()
+                scopes[-1]["expect_relation"] = False
+            token_index += 1
+            continue
+        if kind == "symbol" and value == ",":
+            if scope["in_from"]:
+                scope["expect_relation"] = True
+            token_index += 1
+            continue
+        if kind == "symbol" and value == ";":
+            scope.update(
+                in_from=False,
+                expect_relation=False,
+                query_started=False,
+                allow_bare_from=True,
+                write_kind=None,
+                write_source_pending=False,
+            )
+            token_index += 1
+            continue
+
+        # A qualified relation can start with a word that is also a clause
+        # keyword, such as the catalog name `values`.
+        if scope["expect_relation"] and kind in ("word", "quoted_identifier"):
+            external_name = external_name_at(token_index)
+            if external_name is not None:
+                full_name, last_token_index = external_name
+                external = external_tables.get(full_name)
+                if external:
+                    storage_location = external["storage_location"].replace("'", "''")
+                    replacements.append((start, tokens[last_token_index][1], f"delta_scan('{storage_location}')"))
+                token_index = last_token_index + 1
+                scope["expect_relation"] = False
+                continue
+
+        if kind == "word":
+            keyword = value.upper()
+            is_qualified_part = token_index > 0 and tokens[token_index - 1][2:] == ("symbol", ".")
+            previous_words = [
+                token[3].upper() if token[2] == "word" else None
+                for token in tokens[max(0, token_index - 3) : token_index]
+            ]
+            is_distinct_from = (
+                keyword == "FROM"
+                and len(previous_words) >= 2
+                and previous_words[-1] == "DISTINCT"
+                and previous_words[-2] in {"IS", "NOT"}
+                and (previous_words[-2] != "NOT" or (len(previous_words) >= 3 and previous_words[-3] == "IS"))
+            )
+
+            if (
+                not is_qualified_part
+                and keyword in {"DELETE", "MERGE"}
+                and scope["write_kind"] is None
+                and not scope["query_started"]
+                and not scope["in_from"]
+            ):
+                scope["write_kind"] = keyword
+                scope["write_source_pending"] = True
+
+            if not is_qualified_part and keyword == "SELECT":
+                scope["query_started"] = True
+                scope["allow_bare_from"] = False
+                scope["in_from"] = False
+                scope["expect_relation"] = False
+                token_index += 1
+                continue
+            if not is_qualified_part and keyword in {"FROM", "JOIN"}:
+                if keyword == "JOIN" or (not is_distinct_from and (scope["query_started"] or scope["allow_bare_from"])):
+                    scope["in_from"] = True
+                    scope["expect_relation"] = True
+                token_index += 1
+                continue
+            if (
+                not is_qualified_part
+                and keyword in {"PIVOT", "PIVOT_WIDER", "UNPIVOT"}
+                and not scope["query_started"]
+                and (not scope["in_from"] or scope["expect_relation"])
+            ):
+                # These query forms can use a table as their direct input.
+                scope["in_from"] = True
+                scope["expect_relation"] = True
+                scope["query_started"] = True
+                scope["allow_bare_from"] = False
+                token_index += 1
+                continue
+            if not is_qualified_part and keyword == "USING" and scope["write_source_pending"]:
+                # DELETE and MERGE use USING to introduce a source relation.
+                scope["in_from"] = True
+                scope["expect_relation"] = True
+                scope["write_source_pending"] = False
+                token_index += 1
+                continue
+            if not is_qualified_part and keyword in {"ON", "USING"}:
+                # These begin join/pivot conditions, but the surrounding FROM
+                # list remains active so a following comma can add a relation.
+                scope["expect_relation"] = False
+                token_index += 1
+                continue
+            if not is_qualified_part and keyword in {"UNION", "INTERSECT", "EXCEPT"}:
+                # The next operand begins a new query at the same nesting level.
+                scope.update(in_from=False, expect_relation=False, query_started=False, allow_bare_from=True)
+                token_index += 1
+                continue
+            if (
+                not is_qualified_part
+                and keyword == "VALUES"
+                and (
+                    (scope["in_from"] and not scope["expect_relation"])
+                    or (not scope["query_started"] and not scope["in_from"])
+                )
+            ):
+                # VALUES can be an identifier, or start a query operand.
+                token_index += 1
+                continue
+            if not is_qualified_part and not is_distinct_from and keyword in clause_ends:
+                scope["in_from"] = False
+                scope["expect_relation"] = False
+                scope["allow_bare_from"] = False
+                token_index += 1
+                continue
+            if scope["expect_relation"] and keyword in relation_modifiers:
+                token_index += 1
+                continue
+
+        if scope["expect_relation"] and kind in ("word", "quoted_identifier", "literal"):
+            scope["expect_relation"] = False
+
+        token_index += 1
+
+    for start, end, replacement in reversed(replacements):
+        sql = sql[:start] + replacement + sql[end:]
 
     logger.debug(f"Rewritten SQL: {sql}")
     return sql
@@ -876,7 +1136,7 @@ async def _execute_sql_real(
     Kept as a two-tuple wrapper around `_execute_sql_real_typed` because
     `services/jobs.py` calls it and has no use for the types.
     """
-    columns, _types, rows = await _execute_sql_real_typed(warehouse_id, sql, catalog, schema_name)
+    columns, _types, rows, _arrow_table = await _execute_sql_real_typed(warehouse_id, sql, catalog, schema_name)
     return columns, rows
 
 
@@ -885,8 +1145,9 @@ async def _execute_sql_real_typed(
     sql: str,
     catalog: Optional[str] = None,
     schema_name: Optional[str] = None,
-) -> tuple[List[str], List[Optional[str]], List[List[Any]]]:
-    """Execute SQL against DuckDB and return (column_names, column_types, rows).
+    include_arrow: bool = False,
+) -> tuple[List[str], List[Optional[str]], List[List[Any]], Optional[Any]]:
+    """Execute SQL against DuckDB and return columns, types, rows, and optional Arrow data.
 
     Uses UC connection (shared) instead of warehouse-specific connection,
     so that Unity Catalog tables are accessible to all warehouses.
@@ -896,7 +1157,7 @@ async def _execute_sql_real_typed(
     create_external = _classify_create_external(sql)
     if create_external is not None:
         columns, rows = await _register_external_delta(*create_external)
-        return columns, [None] * len(columns), rows
+        return columns, [None] * len(columns), rows, None
 
     sql = _strip_databricks_ddl_clauses(sql)
 
@@ -904,7 +1165,7 @@ async def _execute_sql_real_typed(
     if delta_write is not None:
         kind, storage_location, match = delta_write
         columns, rows = await _execute_delta_write(kind, storage_location, match)
-        return columns, [None] * len(columns), rows
+        return columns, [None] * len(columns), rows, None
 
     pool = get_duckdb_pool()
     if not pool:
@@ -945,13 +1206,20 @@ async def _execute_sql_real_typed(
             description = result.description or []
             columns = [desc[0] for desc in description]
             column_types = [str(desc[1]) if desc[1] is not None else None for desc in description]
-            rows = result.fetchall()
+            arrow_table = result.fetch_arrow_table() if include_arrow else None
+            if arrow_table is None:
+                rows = result.fetchall()
+            else:
+                # Arrow data is serialized from the table below. Keep empty row
+                # placeholders for chunk counts instead of converting Arrow scalars
+                # to Python values, which can fail for dates outside Python's range.
+                rows = [[] for _ in range(arrow_table.num_rows)]
 
             # Format rows for JSON
             formatted_rows = [[_format_value(cell) for cell in row] for row in rows]
 
             logger.debug(f"SQL execution returned {len(rows)} rows")
-            return columns, column_types, formatted_rows
+            return columns, column_types, formatted_rows, arrow_table
 
         except Exception as e:
             logger.error(f"SQL execution failed: {e}")
@@ -976,8 +1244,8 @@ def _serialize_chunk(columns: List[str], rows: List[List[Any]], fmt: str) -> tup
     if fmt == "ARROW_STREAM":
         import pyarrow as pa
 
-        arrays = [[row[i] for row in rows] for i in range(len(columns))] if rows else [[] for _ in columns]
-        table = pa.table({col: arrays[i] for i, col in enumerate(columns)})
+        arrays = [pa.array([row[i] for row in rows] if rows else []) for i in range(len(columns))]
+        table = pa.Table.from_arrays(arrays, names=columns)
         sink = pa.BufferOutputStream()
         with pa.ipc.new_stream(sink, table.schema) as writer:
             writer.write_table(table)
@@ -985,6 +1253,44 @@ def _serialize_chunk(columns: List[str], rows: List[List[Any]], fmt: str) -> tup
 
     # JSON_ARRAY
     return json.dumps(rows).encode("utf-8"), "application/json"
+
+
+def _serialize_arrow_table(table: Any, offset: int, length: int) -> bytes:
+    """Serialize a slice of DuckDB's Arrow result while retaining its field types."""
+    import pyarrow as pa
+
+    # Slicing the table retains field metadata, including DuckDB Arrow extensions
+    # such as the opaque type used for VARINT values.
+    chunk = table.slice(offset, length)
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, chunk.schema) as writer:
+        writer.write_table(chunk)
+    return sink.getvalue().to_pybytes()
+
+
+def _serialize_arrow_chunks(table: Any) -> List[str]:
+    """Serialize Arrow chunks as base64 so statement snapshots remain JSON-safe."""
+    chunk_count = max(1, (table.num_rows + _CHUNK_SIZE - 1) // _CHUNK_SIZE)
+    return [
+        base64.b64encode(
+            _serialize_arrow_table(
+                table,
+                index * _CHUNK_SIZE,
+                min(_CHUNK_SIZE, table.num_rows - index * _CHUNK_SIZE),
+            )
+        ).decode("ascii")
+        for index in range(chunk_count)
+    ]
+
+
+def _serialize_stored_chunk(
+    stmt: Dict[str, Any], columns: List[str], rows: List[List[Any]], fmt: str, chunk_index: int
+) -> tuple[bytes, str]:
+    """Return a previously materialized Arrow chunk or serialize the cached rows."""
+    arrow_chunks = stmt.get("raw_arrow_chunks") or []
+    if fmt == "ARROW_STREAM" and chunk_index < len(arrow_chunks):
+        return base64.b64decode(arrow_chunks[chunk_index]), "application/vnd.apache.arrow.stream"
+    return _serialize_chunk(columns, rows, fmt)
 
 
 def _column_infos(columns: List[str], column_types: Optional[List[Optional[str]]] = None) -> List[ColumnInfo]:
@@ -1032,6 +1338,7 @@ def _build_result_data(
     disposition: str,
     fmt: str,
     column_types: Optional[List[Optional[str]]] = None,
+    arrow_chunks: Optional[List[str]] = None,
 ) -> ResultData:
     """Build the ResultData for a statement's first chunk, real INLINE data or
     real self-hosted EXTERNAL_LINKS depending on `disposition`."""
@@ -1039,7 +1346,10 @@ def _build_result_data(
         chunks = [rows[i : i + _CHUNK_SIZE] for i in range(0, len(rows), _CHUNK_SIZE)] or [[]]
         num_chunks = len(chunks)
         chunk_rows = chunks[0]
-        content, _ = _serialize_chunk(columns, chunk_rows, fmt)
+        if fmt == "ARROW_STREAM" and arrow_chunks:
+            content = base64.b64decode(arrow_chunks[0])
+        else:
+            content, _ = _serialize_chunk(columns, chunk_rows, fmt)
         base = str(request.base_url).rstrip("/")
         link = ExternalLink(
             chunk_index=0,
@@ -1111,14 +1421,18 @@ async def execute_statement(req: ExecuteStatementRequest, request: Request) -> E
 
     # Execute SQL synchronously (MVP approach: no background jobs)
     try:
-        columns, column_types, rows = await _execute_sql_real_typed(
+        columns, column_types, rows, arrow_table = await _execute_sql_real_typed(
             req.warehouse_id,
             req.statement,
             req.catalog,
             req.schema_name,
+            include_arrow=fmt == "ARROW_STREAM",
         )
 
-        result_data = _build_result_data(request, statement_id, columns, rows, disposition, fmt, column_types)
+        arrow_chunks = _serialize_arrow_chunks(arrow_table) if arrow_table is not None else []
+        result_data = _build_result_data(
+            request, statement_id, columns, rows, disposition, fmt, column_types, arrow_chunks
+        )
         manifest = _build_manifest(columns, rows, fmt, column_types)
 
         # Store the raw rows/columns too (not just the first chunk's rendering)
@@ -1135,6 +1449,7 @@ async def execute_statement(req: ExecuteStatementRequest, request: Request) -> E
                 "raw_columns": columns,
                 "raw_column_types": column_types,
                 "raw_rows": rows,
+                "raw_arrow_chunks": arrow_chunks,
                 "row_count": len(rows),
                 "disposition": disposition,
                 "format": fmt,
@@ -1248,7 +1563,7 @@ async def get_result_chunk(statement_id: str, chunk_index: int, request: Request
     chunk_rows = chunks[chunk_index]
 
     if disposition == "EXTERNAL_LINKS":
-        content, _ = _serialize_chunk(columns, chunk_rows, fmt)
+        content, _ = _serialize_stored_chunk(stmt, columns, chunk_rows, fmt, chunk_index)
         base = str(request.base_url).rstrip("/")
         link = ExternalLink(
             chunk_index=chunk_index,
@@ -1293,7 +1608,7 @@ async def get_result_chunk_data(statement_id: str, chunk_index: int) -> Response
             status_code=404,
         )
 
-    content, content_type = _serialize_chunk(columns, chunks[chunk_index], fmt)
+    content, content_type = _serialize_stored_chunk(stmt, columns, chunks[chunk_index], fmt, chunk_index)
     return Response(content=content, media_type=content_type)
 
 
