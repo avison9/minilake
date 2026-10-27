@@ -190,6 +190,26 @@ async def delete_job(req: DeleteJobRequest) -> dict:
 # ============================================================================
 
 
+def _read_sql_task_file(sql_path, display_path: str) -> str:
+    """Read workspace SQL and report file and decoding failures."""
+    try:
+        if not sql_path.is_file():
+            raise DatabricksError(
+                error_code="INVALID_PARAMETER_VALUE",
+                message=f"Workspace SQL path '{display_path}' is not a file",
+                status_code=400,
+            )
+        return sql_path.read_text(encoding="utf-8")
+    except DatabricksError:
+        raise
+    except (OSError, UnicodeError) as e:
+        raise DatabricksError(
+            error_code="INVALID_PARAMETER_VALUE",
+            message=f"Unable to read workspace SQL file '{display_path}': {e}",
+            status_code=400,
+        ) from e
+
+
 def _resolve_sql_task_text(sql_task: SqlTask) -> str:
     """Return the SQL a sql_task should run, from whichever source it names.
 
@@ -211,7 +231,7 @@ def _resolve_sql_task_text(sql_task: SqlTask) -> str:
                 message=f"Workspace file '{sql_task.file.path}' not found",
                 status_code=404,
             )
-        return sql_path.read_text()
+        return _read_sql_task_file(sql_path, sql_task.file.path)
 
     if sql_task.query is not None:
         return saved_queries.resolve_query_text(sql_task.query.query_id)
@@ -269,6 +289,7 @@ async def _execute_sql_task(task: Task, task_run_id: int, now_ms: int) -> RunTas
     try:
         sql_text = _resolve_sql_task_text(sql_task)
     except DatabricksError as e:
+        _state["task_outputs"][task_run_id] = {"logs": None, "error": e.message}
         return RunTaskInfo(
             task_key=task.task_key,
             run_id=task_run_id,
@@ -536,10 +557,32 @@ async def _execute_run(run_id: int, argv: List[str]) -> None:
     Each task's run_if is evaluated against its *direct* dependencies' real
     outcomes before it runs; a task whose condition isn't met is SKIPPED.
     """
-    run = _state["runs"][run_id]
+    run = _state["runs"].get(run_id)
+    if run is None:
+        return
     run["state"] = {"life_cycle_state": "RUNNING", "result_state": None, "state_message": None}
     run["start_time"] = int(time.time() * 1000)
 
+    try:
+        await _execute_run_tasks(run_id, argv)
+    except Exception as e:
+        import traceback
+
+        diagnostic = traceback.format_exc()
+        message = f"Run execution failed: {type(e).__name__}: {e}"
+        logger.error("Run %s failed unexpectedly: %s", run_id, diagnostic)
+        run["end_time"] = int(time.time() * 1000)
+        run["state"] = {
+            "life_cycle_state": "TERMINATED",
+            "result_state": RunResultState.FAILED.value,
+            "state_message": message,
+        }
+        _state.setdefault("task_outputs", {})[run_id] = {"logs": None, "error": diagnostic}
+
+
+async def _execute_run_tasks(run_id: int, argv: List[str]) -> None:
+    """Run the shared DAG scheduler after the outer run boundary is established."""
+    run = _state["runs"][run_id]
     # A submitted run carries its own tasks (no job_id); a triggered run reads them
     # from the job. Everything downstream — the DAG, run_if, cancellation — is shared.
     job = _state["jobs"].get(run["job_id"])
@@ -578,7 +621,12 @@ async def _execute_run(run_id: int, argv: List[str]) -> None:
                     state=RunState(life_cycle_state="SKIPPED", state_message="Unresolvable dependency or cycle"),
                 )
             break
-        await asyncio.gather(*(run_one(k) for k in ready))
+        outcomes = await asyncio.gather(*(run_one(k) for k in ready), return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, asyncio.CancelledError):
+                raise RuntimeError("A job task was cancelled unexpectedly") from outcome
+            if isinstance(outcome, Exception):
+                raise outcome
         pending -= set(ready)
 
     task_results = [results[t.task_key] for t in tasks]
