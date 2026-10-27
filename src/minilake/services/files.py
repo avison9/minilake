@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/2.0/fs", tags=["files"])
 def _files_root() -> Path:
     root = settings.data_dir / "dbfs"
     root.mkdir(parents=True, exist_ok=True)
-    return root
+    return root.resolve()
 
 
 def _normalize(path: str) -> str:
