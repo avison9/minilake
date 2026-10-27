@@ -43,7 +43,7 @@ _state: Dict[str, Any] = {
 def _dbfs_root() -> Path:
     root = settings.data_dir / "dbfs"
     root.mkdir(parents=True, exist_ok=True)
-    return root
+    return root.resolve()
 
 
 def _normalize(path: str) -> str:
