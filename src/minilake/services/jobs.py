@@ -50,6 +50,7 @@ router = APIRouter(prefix="/api/2.2/jobs", tags=["jobs"])
 _state: Dict[str, Any] = {
     "jobs": {},  # job_id (int) -> {job_id, created_time, creator_user_name, settings: dict}
     "runs": {},  # run_id (int) -> {..., "_cancel_requested": bool}
+    "task_outputs": {},  # task run_id (int) -> {logs, error}
     "submit_tokens": {},  # idempotency_token (str) -> run_id, for runs/submit
     "next_job_id": 1,
     "next_run_id": 1,
@@ -868,9 +869,15 @@ def get_state() -> Dict[str, Any]:
 
 
 def restore_state(data: Dict[str, Any]) -> None:
-    """Restore state from snapshot."""
+    """Restore state from snapshot, converting JSON object IDs back to integers."""
     global _state
-    _state.update(data)
+    restored = data.copy()
+    # JSON object keys are always strings. These registries are indexed by
+    # numeric IDs at runtime, so restore their key types before serving API calls.
+    for registry in ("jobs", "runs", "task_outputs"):
+        if registry in restored:
+            restored[registry] = {int(key): value for key, value in restored[registry].items()}
+    _state.update(restored)
 
 
 async def reset() -> None:
@@ -879,6 +886,7 @@ async def reset() -> None:
     _state = {
         "jobs": {},
         "runs": {},
+        "task_outputs": {},
         "submit_tokens": {},
         "next_job_id": 1,
         "next_run_id": 1,
