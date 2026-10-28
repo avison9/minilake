@@ -1,14 +1,18 @@
 """DBFS (Databricks File System) API endpoints — real file-backed storage.
 
-Files live under `settings.data_dir / "dbfs"`. Chunked upload (create/add-block/
-close) is tracked with a small in-memory handle table, matching the real API's
-session-based upload model — the handle itself is ephemeral, only the final
-file on disk persists.
+Ordinary files live under `settings.data_dir / "dbfs"`; `/Volumes/...` URIs
+resolve to their Unity Catalog volume directory. Chunked upload (create/add-
+block/close) uses an in-memory handle table, matching the real API's session-
+based upload model — only the final file persists.
 """
 
 import base64
+import ctypes
+import errno
 import logging
+import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -29,6 +33,7 @@ from minilake.models.dbfs import (
     PutDbfsRequest,
     ReadFileResponse,
 )
+from minilake.services.volume_paths import resolve_volume_path
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +48,7 @@ _state: Dict[str, Any] = {
 def _dbfs_root() -> Path:
     root = settings.data_dir / "dbfs"
     root.mkdir(parents=True, exist_ok=True)
-    return root
+    return root.resolve()
 
 
 def _normalize(path: str) -> str:
@@ -56,6 +61,10 @@ def _normalize(path: str) -> str:
 
 def _resolve(path: str) -> Path:
     normalized = _normalize(path)
+    volume_path = resolve_volume_path(normalized)
+    if volume_path is not None:
+        return volume_path
+
     root = _dbfs_root()
     resolved = (root / normalized.lstrip("/")).resolve()
     if resolved != root and root not in resolved.parents:
@@ -63,11 +72,84 @@ def _resolve(path: str) -> Path:
     return resolved
 
 
+def _rename_without_replace(source: Path, destination: Path) -> None:
+    """Rename a DBFS path without replacing an existing destination."""
+    if os.name == "nt":
+        # Windows os.rename already fails if the destination exists.
+        source.rename(destination)
+        return
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "linux":
+        rename = getattr(libc, "renameat2", None)
+        if rename is not None:
+            rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            rename.restype = ctypes.c_int
+            result = rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+        else:
+            result = -1
+            ctypes.set_errno(errno.ENOSYS)
+    elif sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        if rename is not None:
+            rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            rename.restype = ctypes.c_int
+            result = rename(os.fsencode(source), os.fsencode(destination), 0x00000004)
+        else:
+            result = -1
+            ctypes.set_errno(errno.ENOSYS)
+    else:
+        result = -1
+        ctypes.set_errno(errno.ENOSYS)
+
+    if result == 0:
+        return
+
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise FileExistsError(error_number, os.strerror(error_number), str(destination))
+    if error_number not in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+        raise OSError(error_number, os.strerror(error_number), str(destination))
+
+    # Do not fall back to Path.rename here: it can replace a destination created
+    # concurrently after an existence check and silently discard its contents.
+    if destination.exists():
+        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination))
+    raise NotImplementedError("Exclusive rename is not supported by this filesystem")
+
+
 def _b64_decode(data: str) -> bytes:
     try:
         return base64.b64decode(data, validate=True)
     except Exception as e:
         raise DatabricksError(error_code="INVALID_REQUEST", message=f"Invalid base64 content: {e}", status_code=400)
+
+
+def _write_file_without_overwrite(file_path: Path, content: bytes) -> None:
+    """Publish a complete file atomically, failing if its destination exists."""
+    import tempfile
+
+    fd, temporary_path = tempfile.mkstemp(prefix=".minilake-upload-", dir=file_path.parent)
+    committed = False
+    try:
+        with os.fdopen(fd, "wb") as temporary_file:
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        # The temporary file is in the same directory, so linking it publishes
+        # the complete contents atomically and cannot replace an existing path.
+        os.link(temporary_path, file_path)
+        committed = True
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            if committed:
+                logger.warning("Could not remove temporary DBFS upload file %s", temporary_path, exc_info=True)
+            else:
+                raise
 
 
 def _file_info(normalized: str, real_path: Path) -> DbfsFileInfo:
@@ -111,10 +193,22 @@ async def close_handle(req: CloseHandleRequest) -> dict:
     """Finalize an upload: write the accumulated buffer to disk for real."""
     if req.handle not in _state["handles"]:
         raise DatabricksError(error_code="NOT_FOUND", message=f"Handle {req.handle} not found", status_code=404)
-    entry = _state["handles"].pop(req.handle)
+    entry = _state["handles"][req.handle]
     file_path = _resolve(entry["path"])
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_bytes(bytes(entry["buffer"]))
+    content = bytes(entry["buffer"])
+    try:
+        if entry["overwrite"]:
+            file_path.write_bytes(content)
+        else:
+            _write_file_without_overwrite(file_path, content)
+    except FileExistsError:
+        raise DatabricksError(
+            error_code="RESOURCE_ALREADY_EXISTS",
+            message=f"Path '{entry['path']}' already exists",
+            status_code=400,
+        ) from None
+    _state["handles"].pop(req.handle)
     logger.info(f"DBFS wrote {len(entry['buffer'])} bytes to {entry['path']}")
     return {}
 
@@ -216,7 +310,20 @@ async def move_path(req: MoveDbfsRequest) -> dict:
             error_code="RESOURCE_DOES_NOT_EXIST", message=f"Path '{req.source_path}' not found", status_code=404
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    source.rename(destination)
+    try:
+        _rename_without_replace(source, destination)
+    except FileExistsError:
+        raise DatabricksError(
+            error_code="RESOURCE_ALREADY_EXISTS",
+            message=f"Path '{req.destination_path}' already exists",
+            status_code=400,
+        ) from None
+    except NotImplementedError as e:
+        raise DatabricksError(
+            error_code="NOT_IMPLEMENTED",
+            message=f"Cannot move '{req.source_path}': {e}",
+            status_code=501,
+        ) from None
     return {}
 
 
@@ -226,7 +333,10 @@ async def move_path(req: MoveDbfsRequest) -> dict:
 
 
 def get_state() -> Dict[str, Any]:
-    return _state.copy()
+    # Upload handles are transient and their bytearray buffers cannot be
+    # serialized to the JSON persistence snapshot. Only persist the handle
+    # counter; unfinished uploads are intentionally discarded on restart.
+    return {"handles": {}, "next_handle": _state["next_handle"]}
 
 
 def restore_state(data: Dict[str, Any]) -> None:
