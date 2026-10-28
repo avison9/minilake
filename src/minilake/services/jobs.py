@@ -10,6 +10,7 @@ import asyncio
 import logging
 import re
 import time
+from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query, Request
@@ -50,7 +51,9 @@ router = APIRouter(prefix="/api/2.2/jobs", tags=["jobs"])
 _state: Dict[str, Any] = {
     "jobs": {},  # job_id (int) -> {job_id, created_time, creator_user_name, settings: dict}
     "runs": {},  # run_id (int) -> {..., "_cancel_requested": bool}
+    "task_outputs": {},  # task run_id (int) -> {logs, error}
     "submit_tokens": {},  # idempotency_token (str) -> run_id, for runs/submit
+    "run_now_tokens": {},  # idempotency_token (str) -> run_id, for jobs/run-now
     "next_job_id": 1,
     "next_run_id": 1,
 }
@@ -102,6 +105,50 @@ def _params_to_argv(
     return argv
 
 
+def _task_graph_error(tasks: List[Task]) -> Optional[str]:
+    """Return a validation error for a task graph that cannot be scheduled."""
+    task_keys = set()
+    for task in tasks:
+        if task.task_key in task_keys:
+            return f"Task key '{task.task_key}' is not unique."
+        task_keys.add(task.task_key)
+
+    dependencies_by_key: Dict[str, set] = {}
+    dependents_by_key: Dict[str, List[str]] = defaultdict(list)
+    for task in tasks:
+        dependencies = {dependency.task_key for dependency in (task.depends_on or [])}
+        for dependency_key in dependencies:
+            if dependency_key not in task_keys:
+                return f"Task '{task.task_key}' depends on unknown task '{dependency_key}'."
+            dependents_by_key[dependency_key].append(task.task_key)
+        dependencies_by_key[task.task_key] = dependencies
+
+    ready = deque(task_key for task_key, dependencies in dependencies_by_key.items() if not dependencies)
+    visited = 0
+    while ready:
+        task_key = ready.popleft()
+        visited += 1
+        for dependent_key in dependents_by_key[task_key]:
+            dependencies = dependencies_by_key[dependent_key]
+            dependencies.remove(task_key)
+            if not dependencies:
+                ready.append(dependent_key)
+
+    if visited != len(tasks):
+        return "Task dependencies contain a cycle."
+    return None
+
+
+def _validate_task_graph(tasks: List[Task]) -> None:
+    error = _task_graph_error(tasks)
+    if error:
+        raise DatabricksError(error_code="INVALID_PARAMETER_VALUE", message=error, status_code=400)
+
+
+def _tasks_from_settings(settings: Dict[str, Any]) -> List[Task]:
+    return [Task(**task) for task in (settings.get("tasks") or [])]
+
+
 # ============================================================================
 # Jobs CRUD
 # ============================================================================
@@ -110,6 +157,7 @@ def _params_to_argv(
 @router.post("/create", response_model=CreateJobResponse)
 async def create_job(req: CreateJobRequest) -> CreateJobResponse:
     """Create a new job."""
+    _validate_task_graph(req.tasks or [])
     job_id = _next_job_id()
     now_ms = int(time.time() * 1000)
     _state["jobs"][job_id] = {
@@ -151,10 +199,13 @@ async def update_job(req: UpdateJobRequest) -> dict:
             status_code=404,
         )
     job = _state["jobs"][req.job_id]
+    new_settings = dict(job["settings"])
     if req.new_settings is not None:
-        job["settings"].update(req.new_settings.model_dump(exclude_none=True))
+        new_settings.update(req.new_settings.model_dump(exclude_none=True))
     for field in req.fields_to_remove or []:
-        job["settings"].pop(field, None)
+        new_settings.pop(field, None)
+    _validate_task_graph(_tasks_from_settings(new_settings))
+    job["settings"] = new_settings
     return {}
 
 
@@ -167,7 +218,9 @@ async def reset_job(req: ResetJobRequest) -> dict:
             message=f"Job {req.job_id} not found",
             status_code=404,
         )
-    _state["jobs"][req.job_id]["settings"] = req.new_settings.model_dump(exclude_none=True)
+    new_settings = req.new_settings.model_dump(exclude_none=True)
+    _validate_task_graph(_tasks_from_settings(new_settings))
+    _state["jobs"][req.job_id]["settings"] = new_settings
     return {}
 
 
@@ -187,6 +240,26 @@ async def delete_job(req: DeleteJobRequest) -> dict:
 # ============================================================================
 # Runs — real execution
 # ============================================================================
+
+
+def _read_sql_task_file(sql_path, display_path: str) -> str:
+    """Read workspace SQL and report file and decoding failures."""
+    try:
+        if not sql_path.is_file():
+            raise DatabricksError(
+                error_code="INVALID_PARAMETER_VALUE",
+                message=f"Workspace SQL path '{display_path}' is not a file",
+                status_code=400,
+            )
+        return sql_path.read_text(encoding="utf-8")
+    except DatabricksError:
+        raise
+    except (OSError, UnicodeError) as e:
+        raise DatabricksError(
+            error_code="INVALID_PARAMETER_VALUE",
+            message=f"Unable to read workspace SQL file '{display_path}': {e}",
+            status_code=400,
+        ) from e
 
 
 def _resolve_sql_task_text(sql_task: SqlTask) -> str:
@@ -210,7 +283,7 @@ def _resolve_sql_task_text(sql_task: SqlTask) -> str:
                 message=f"Workspace file '{sql_task.file.path}' not found",
                 status_code=404,
             )
-        return sql_path.read_text()
+        return _read_sql_task_file(sql_path, sql_task.file.path)
 
     if sql_task.query is not None:
         return saved_queries.resolve_query_text(sql_task.query.query_id)
@@ -268,6 +341,7 @@ async def _execute_sql_task(task: Task, task_run_id: int, now_ms: int) -> RunTas
     try:
         sql_text = _resolve_sql_task_text(sql_task)
     except DatabricksError as e:
+        _state["task_outputs"][task_run_id] = {"logs": None, "error": e.message}
         return RunTaskInfo(
             task_key=task.task_key,
             run_id=task_run_id,
@@ -535,10 +609,32 @@ async def _execute_run(run_id: int, argv: List[str]) -> None:
     Each task's run_if is evaluated against its *direct* dependencies' real
     outcomes before it runs; a task whose condition isn't met is SKIPPED.
     """
-    run = _state["runs"][run_id]
+    run = _state["runs"].get(run_id)
+    if run is None:
+        return
     run["state"] = {"life_cycle_state": "RUNNING", "result_state": None, "state_message": None}
     run["start_time"] = int(time.time() * 1000)
 
+    try:
+        await _execute_run_tasks(run_id, argv)
+    except Exception as e:
+        import traceback
+
+        diagnostic = traceback.format_exc()
+        message = f"Run execution failed: {type(e).__name__}: {e}"
+        logger.error("Run %s failed unexpectedly: %s", run_id, diagnostic)
+        run["end_time"] = int(time.time() * 1000)
+        run["state"] = {
+            "life_cycle_state": "TERMINATED",
+            "result_state": RunResultState.FAILED.value,
+            "state_message": message,
+        }
+        _state.setdefault("task_outputs", {})[run_id] = {"logs": None, "error": diagnostic}
+
+
+async def _execute_run_tasks(run_id: int, argv: List[str]) -> None:
+    """Run the shared DAG scheduler after the outer run boundary is established."""
+    run = _state["runs"][run_id]
     # A submitted run carries its own tasks (no job_id); a triggered run reads them
     # from the job. Everything downstream — the DAG, run_if, cancellation — is shared.
     job = _state["jobs"].get(run["job_id"])
@@ -546,8 +642,27 @@ async def _execute_run(run_id: int, argv: List[str]) -> None:
     if task_source is None:
         task_source = (job["settings"].get("tasks") if job else []) or []
     tasks = [Task(**t) for t in task_source]
+    graph_error = _task_graph_error(tasks)
+    if graph_error:
+        end_ms = int(time.time() * 1000)
+        run["tasks"] = [
+            RunTaskInfo(
+                task_key=task.task_key,
+                state=RunState(life_cycle_state="SKIPPED", state_message=graph_error),
+            ).model_dump(exclude_none=True)
+            for task in tasks
+        ]
+        run["end_time"] = end_ms
+        run["state"] = {
+            "life_cycle_state": "TERMINATED",
+            "result_state": RunResultState.FAILED.value,
+            "state_message": graph_error,
+        }
+        logger.warning("Run %s rejected an invalid task graph: %s", run_id, graph_error)
+        return
+
     task_by_key = {t.task_key: t for t in tasks}
-    deps_by_key = {t.task_key: [d.task_key for d in (t.depends_on or []) if d.task_key in task_by_key] for t in tasks}
+    deps_by_key = {t.task_key: [d.task_key for d in (t.depends_on or [])] for t in tasks}
 
     results: Dict[str, RunTaskInfo] = {}
 
@@ -566,18 +681,24 @@ async def _execute_run(run_id: int, argv: List[str]) -> None:
             results[task_key] = await _execute_task(task, argv)
 
     pending = set(task_by_key.keys())
+    unschedulable = False
     while pending:
         ready = [k for k in pending if all(d in results for d in deps_by_key[k])]
         if not ready:
-            # depends_on references a nonexistent task_key or forms a cycle —
-            # can't schedule the rest; SKIP them rather than hang forever.
+            # Defensive fallback in case the graph changes after validation.
+            unschedulable = True
             for k in pending:
                 results[k] = RunTaskInfo(
                     task_key=k,
                     state=RunState(life_cycle_state="SKIPPED", state_message="Unresolvable dependency or cycle"),
                 )
             break
-        await asyncio.gather(*(run_one(k) for k in ready))
+        outcomes = await asyncio.gather(*(run_one(k) for k in ready), return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, asyncio.CancelledError):
+                raise RuntimeError("A job task was cancelled unexpectedly") from outcome
+            if isinstance(outcome, Exception):
+                raise outcome
         pending -= set(ready)
 
     task_results = [results[t.task_key] for t in tasks]
@@ -594,7 +715,7 @@ async def _execute_run(run_id: int, argv: List[str]) -> None:
             "result_state": RunResultState.CANCELED.value,
             "state_message": "Run canceled",
         }
-    elif any_failed:
+    elif any_failed or unschedulable:
         run["state"] = {
             "life_cycle_state": "TERMINATED",
             "result_state": RunResultState.FAILED.value,
@@ -612,12 +733,27 @@ async def _execute_run(run_id: int, argv: List[str]) -> None:
 @router.post("/run-now", response_model=RunNowResponse)
 async def run_now(req: RunNowRequest) -> RunNowResponse:
     """Trigger a job run. Executes tasks for real in the background."""
+    token = req.idempotency_token
+    if token is not None:
+        existing_run_id = _state["run_now_tokens"].get(token)
+        if existing_run_id is not None:
+            if existing_run_id not in _state["runs"]:
+                raise DatabricksError(
+                    error_code="NOT_FOUND",
+                    message=f"Run {existing_run_id} for idempotency token was deleted",
+                    status_code=404,
+                )
+            logger.info(f"Run-now with idempotency token reused run {existing_run_id}")
+            return RunNowResponse(run_id=existing_run_id, number_in_job=existing_run_id)
+
     if req.job_id not in _state["jobs"]:
         raise DatabricksError(
             error_code="NOT_FOUND",
             message=f"Job {req.job_id} not found",
             status_code=404,
         )
+
+    _validate_task_graph(_tasks_from_settings(_state["jobs"][req.job_id]["settings"]))
 
     run_id = _next_run_id()
     now_ms = int(time.time() * 1000)
@@ -631,6 +767,10 @@ async def run_now(req: RunNowRequest) -> RunNowResponse:
         "tasks": [],
         "_cancel_requested": False,
     }
+    if token is not None:
+        # There is no await between checking the token and recording the new run,
+        # so retries are serialized by the single-process event loop.
+        _state["run_now_tokens"][token] = run_id
 
     argv = _params_to_argv(
         static_list=None,
@@ -665,6 +805,8 @@ async def submit_run(req: SubmitRunRequest) -> SubmitRunResponse:
         if existing is not None:
             logger.info(f"Submit with idempotency_token '{token}' reused run {existing}")
             return SubmitRunResponse(run_id=existing)
+
+    _validate_task_graph(req.tasks)
 
     run_id = _next_run_id()
     now_ms = int(time.time() * 1000)
@@ -820,9 +962,15 @@ def get_state() -> Dict[str, Any]:
 
 
 def restore_state(data: Dict[str, Any]) -> None:
-    """Restore state from snapshot."""
+    """Restore state from snapshot, converting JSON object IDs back to integers."""
     global _state
-    _state.update(data)
+    restored = data.copy()
+    # JSON object keys are always strings. These registries are indexed by
+    # numeric IDs at runtime, so restore their key types before serving API calls.
+    for registry in ("jobs", "runs", "task_outputs"):
+        if registry in restored:
+            restored[registry] = {int(key): value for key, value in restored[registry].items()}
+    _state.update(restored)
 
 
 async def reset() -> None:
@@ -831,7 +979,9 @@ async def reset() -> None:
     _state = {
         "jobs": {},
         "runs": {},
+        "task_outputs": {},
         "submit_tokens": {},
+        "run_now_tokens": {},
         "next_job_id": 1,
         "next_run_id": 1,
     }
