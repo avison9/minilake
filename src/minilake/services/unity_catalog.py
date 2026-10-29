@@ -664,6 +664,10 @@ def _delete_catalog_children(name: str) -> None:
         for full_name in [k for k in _state[registry] if k.startswith(f"{name}.")]:
             del _state[registry][full_name]
 
+    from minilake.services import grants
+
+    grants.delete_grants_for_parent(name, "CATALOG")
+
 
 def _delete_schema_children(full_name: str) -> None:
     """Remove registered children after deleting their backing schema."""
@@ -676,6 +680,10 @@ def _delete_schema_children(full_name: str) -> None:
     for registry in ("tables", "external_tables", "volumes", "functions"):
         for table_name in [k for k in _state[registry] if k.startswith(prefix)]:
             del _state[registry][table_name]
+
+    from minilake.services import grants
+
+    grants.delete_grants_for_parent(full_name, "SCHEMA")
 
 
 # ============================================================================
@@ -1052,6 +1060,9 @@ async def list_volumes(
     schema_name: str = Query(..., alias="schema_name"),
 ) -> ListVolumesResponse:
     """List volumes in a schema."""
+    if catalog_name not in _state["catalogs"] or f"{catalog_name}.{schema_name}" not in _state["schemas"]:
+        return ListVolumesResponse(volumes=[])
+
     records = {
         full_name: record
         for full_name, record in _state["volumes"].items()
@@ -1091,6 +1102,12 @@ def _adopt_unregistered_volume(full_name: str) -> dict:
 async def get_volume(full_name: str) -> VolumeInfo:
     """Get a volume by its three-level (fully qualified) name: catalog.schema.volume."""
     catalog_name, schema_name, name = _split_three_part(full_name, "volume")
+    if catalog_name not in _state["catalogs"] or f"{catalog_name}.{schema_name}" not in _state["schemas"]:
+        raise DatabricksError(
+            error_code="NOT_FOUND",
+            message=f"Volume '{full_name}' not found",
+            status_code=404,
+        )
 
     record = _state["volumes"].get(full_name)
     if record is None:
@@ -1109,7 +1126,13 @@ async def get_volume(full_name: str) -> VolumeInfo:
 @router.patch("/volumes/{full_name}", response_model=VolumeInfo)
 async def update_volume(full_name: str, req: UpdateVolumeRequest) -> VolumeInfo:
     """Update a volume's metadata (comment, properties, owner)."""
-    _split_three_part(full_name, "volume")
+    catalog_name, schema_name, _ = _split_three_part(full_name, "volume")
+    if catalog_name not in _state["catalogs"] or f"{catalog_name}.{schema_name}" not in _state["schemas"]:
+        raise DatabricksError(
+            error_code="NOT_FOUND",
+            message=f"Volume '{full_name}' not found",
+            status_code=404,
+        )
     record = _state["volumes"].get(full_name)
     if record is None:
         raise DatabricksError(
