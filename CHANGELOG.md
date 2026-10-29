@@ -8,6 +8,85 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-feature design rationale and known limitations live in [FEATURES.md](FEATURES.md);
 this file records what changed between releases.
 
+## [1.9.1] — 2026-10-29
+
+A bug-fix release. It makes SQL, Unity Catalog, DBFS/Files, jobs, clusters and SCIM
+safer on edge cases, and fixes data-loss and state bugs found by users.
+
+Thanks to [@eddiethedean](https://github.com/eddiethedean) (Odos Matthews) for most of
+the fixes in this release, and to [@avison9](https://github.com/avison9) for
+[#68](https://github.com/dmux/minilake/pull/68).
+
+### Fixed
+
+**SQL**
+
+- **Invalid namespaces are rejected** instead of silently resolving to the wrong schema
+  ([#61](https://github.com/dmux/minilake/pull/61)).
+- **Comments that mention DDL clauses no longer change DML predicates**
+  ([#62](https://github.com/dmux/minilake/pull/62)).
+- **External Delta table references are rewritten safely**, including nested queries and
+  write statements ([#84](https://github.com/dmux/minilake/pull/84)).
+- **Arrow results keep duplicate column names and SQL types**
+  ([#54](https://github.com/dmux/minilake/pull/54),
+  [#83](https://github.com/dmux/minilake/pull/83)).
+- **The newest result is kept when the statement cache overflows**
+  ([#67](https://github.com/dmux/minilake/pull/67)).
+- **Saved queries run in their own namespace**
+  ([#76](https://github.com/dmux/minilake/pull/76)).
+- **`MINILAKE_DUCKDB_MEMORY_LIMIT` applies to every DuckDB connection**
+  ([#68](https://github.com/dmux/minilake/pull/68)).
+- **Full reset clears the default DuckDB data**
+  ([#71](https://github.com/dmux/minilake/pull/71)).
+
+**Unity Catalog**
+
+- **`force` is honored when deleting catalogs and schemas**, and deleting them cleans up
+  their children ([#60](https://github.com/dmux/minilake/pull/60),
+  [#77](https://github.com/dmux/minilake/pull/77)).
+
+**DBFS, Files and Workspace**
+
+- **Files and DBFS paths resolve to Unity Catalog volume storage**, and relative data
+  directories work ([#72](https://github.com/dmux/minilake/pull/72),
+  [#82](https://github.com/dmux/minilake/pull/82)).
+- **Moves no longer overwrite an existing destination**, and `overwrite=false` is honored
+  for chunked uploads ([#65](https://github.com/dmux/minilake/pull/65),
+  [#66](https://github.com/dmux/minilake/pull/66)).
+- **Unfinished uploads no longer break persisted snapshots**
+  ([#59](https://github.com/dmux/minilake/pull/59)).
+- **Cached workspace directory metadata is cleared on change**
+  ([#78](https://github.com/dmux/minilake/pull/78)).
+
+**Jobs, clusters and SCIM**
+
+- **Invalid job dependency graphs are rejected**
+  ([#70](https://github.com/dmux/minilake/pull/70)).
+- **`jobs/run-now` honors idempotency tokens**, and persisted jobs and runs are restored
+  by numeric ID ([#64](https://github.com/dmux/minilake/pull/64),
+  [#73](https://github.com/dmux/minilake/pull/73)).
+- **SQL task runs end when the SQL file cannot be read**
+  ([#81](https://github.com/dmux/minilake/pull/81)).
+- **Cluster edits are atomic**, and stale transitions no longer override newer requests
+  ([#75](https://github.com/dmux/minilake/pull/75),
+  [#79](https://github.com/dmux/minilake/pull/79)).
+- **Idempotent updates keep existing names**
+  ([#74](https://github.com/dmux/minilake/pull/74)).
+- **SCIM patches are applied atomically**
+  ([#80](https://github.com/dmux/minilake/pull/80)).
+
+**MCP**
+
+- **`seed_table` keeps the existing table if the replacement fails**
+  ([#63](https://github.com/dmux/minilake/pull/63)).
+
+### Changed
+
+- **Clearer startup message when the Docker daemon is missing**
+  ([#87](https://github.com/dmux/minilake/pull/87)).
+- **Python and UI dependencies updated** within current constraints
+  ([#86](https://github.com/dmux/minilake/pull/86)).
+
 ## [1.9.0] — 2026-10-24
 
 Hardens the backtick-identifier rewriter that lets Databricks-style `` `name` `` quoting
