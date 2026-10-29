@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import docker
-from docker.errors import DockerException
+from docker.errors import APIError, DockerException
 
 from minilake.config import ensure_writable_dir, settings
 
@@ -335,8 +335,21 @@ def prewarm_spark_image(image: Optional[str] = None) -> None:
         logger.info(f"Pre-pulling job execution image: {spark_image}")
         client.images.pull(spark_image)
         logger.info(f"Pre-pulled job execution image: {spark_image}")
+    except APIError as e:
+        # The daemon answered but the pull failed (no network, registry error): real
+        # execution falls back to pulling lazily on first job run.
+        logger.warning(f"Failed to pre-pull job execution image {spark_image} (non-critical): {e}")
+    except DockerException as e:
+        # No daemon to talk to (missing socket, permissions). Common for a plain
+        # `pip install`, where Docker is optional, so say what it means and how to opt out
+        # rather than surfacing the raw connection error. Stays a WARNING: the default log
+        # level hides INFO, and Spark job tasks really will fail without Docker.
+        logger.warning(
+            f"Docker is not reachable ({e}); skipping the Spark image pre-pull. "
+            "Spark job tasks need Docker (or set MINILAKE_JOB_EXECUTOR=subprocess). "
+            "Set MINILAKE_SPARK_PREWARM=0 to silence this."
+        )
     except Exception as e:
-        # Broad catch: no Docker socket, no network, wrong permissions, etc. are
-        # all non-fatal here — real execution just falls back to pulling lazily
-        # on first job run instead of being pre-warmed.
+        # Anything else is non-fatal too: real execution just falls back to pulling
+        # lazily on first job run instead of being pre-warmed.
         logger.warning(f"Failed to pre-pull job execution image {spark_image} (non-critical): {e}")

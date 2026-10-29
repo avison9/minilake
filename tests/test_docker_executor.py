@@ -7,9 +7,11 @@ fallback backend directly, since it's an internal execution-strategy toggle
 """
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
+from docker.errors import APIError, DockerException
 
 from minilake import docker_executor
 
@@ -156,3 +158,53 @@ def test_subprocess_executor_times_out_for_real(monkeypatch, tmp_path: Path):
 
     assert result.timed_out is True
     print("✓ subprocess executor real timeout enforcement works")
+
+
+def _raise(exc: Exception):
+    def _factory(*_args, **_kwargs):
+        raise exc
+
+    return _factory
+
+
+@pytest.mark.error
+def test_prewarm_without_docker_logs_an_actionable_warning(monkeypatch, caplog):
+    """No Docker socket is expected on a plain `pip install`: say what it means and how to opt out."""
+    monkeypatch.delenv("MINILAKE_JOB_EXECUTOR", raising=False)
+    monkeypatch.delenv("MINILAKE_SPARK_PREWARM", raising=False)
+    monkeypatch.setattr(
+        docker_executor,
+        "_get_client",
+        _raise(DockerException("Error while fetching server API version: FileNotFoundError(2)")),
+    )
+
+    with caplog.at_level(logging.INFO, logger=docker_executor.logger.name):
+        docker_executor.prewarm_spark_image()
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert not any("Failed to pre-pull" in msg for msg in warnings)
+    notice = next(msg for msg in warnings if "Docker is not reachable" in msg)
+    assert "MINILAKE_SPARK_PREWARM=0" in notice
+    assert "MINILAKE_JOB_EXECUTOR=subprocess" in notice
+
+
+@pytest.mark.error
+def test_prewarm_pull_failure_still_warns(monkeypatch, caplog):
+    """A daemon that answers but cannot pull is a real (non-critical) warning."""
+    monkeypatch.delenv("MINILAKE_JOB_EXECUTOR", raising=False)
+    monkeypatch.delenv("MINILAKE_SPARK_PREWARM", raising=False)
+
+    class _Images:
+        pull = staticmethod(_raise(APIError("registry unreachable")))
+
+    class _Client:
+        images = _Images()
+
+    monkeypatch.setattr(docker_executor, "_get_client", lambda: _Client())
+
+    with caplog.at_level(logging.INFO, logger=docker_executor.logger.name):
+        docker_executor.prewarm_spark_image()
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("Failed to pre-pull" in msg for msg in warnings)
+    assert not any("Docker is not reachable" in r.getMessage() for r in caplog.records)
