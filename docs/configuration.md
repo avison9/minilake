@@ -35,7 +35,7 @@ Everything is set through environment variables. Nothing needs a config file.
 | `MINILAKE_DOCKER_VOLUME` | unset | Named volume backing `MINILAKE_DATA_DIR`, shared with spawned job containers. Falls back to introspecting minilake's own mounts |
 | `MINILAKE_DOCKER_NETWORK` | unset | Network to attach job containers to, so a task can call back into the API. Falls back to introspection when minilake is on exactly one network |
 | `MINILAKE_IVY_SEED` | unset (`/opt/ivy-cache` in the image) | Pre-resolved Delta / Unity Catalog jars, copied onto the shared data volume on first job run so `spark-submit --packages` resolves without Maven Central |
-| `MINILAKE_SPARK_PREWARM` | unset | `0` skips the best-effort `docker pull` of the Spark image at startup — worth setting on a machine with no network, where the attempt only costs a timeout |
+| `MINILAKE_SPARK_PREWARM` | unset | `0` skips the best-effort `docker pull` of the Spark image at startup — worth setting on a machine with no network, where the attempt only costs a timeout. Also silences the "Docker is not reachable" warning on a machine without Docker |
 
 ### TLS
 

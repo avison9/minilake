@@ -12,6 +12,11 @@ pip install minilake
 minilake --port 8000
 ```
 
+Docker is optional for a `pip` install. Without it everything works except Jobs that run on
+real Spark, and startup logs a single warning saying Docker is not reachable. Set
+`MINILAKE_SPARK_PREWARM=0` to silence it, or `MINILAKE_JOB_EXECUTOR=subprocess` to run job
+tasks as local processes (no Spark).
+
 Add the MCP extra if you want the agent interface: `pip install 'minilake[mcp]'`. See
 [MCP overview](mcp/index.md).
 
