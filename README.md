@@ -1,137 +1,100 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/dmux/minilake/main/minilake_logo.png" alt="minilake — Local Databricks API Emulator" width="400"/>
+  <img src="https://raw.githubusercontent.com/dmux/minilake/main/minilake_logo.png" alt="minilake" width="240"/>
 </p>
 
 <h1 align="center">MiniLake</h1>
-<p align="center"><strong>Free, open-source local Databricks emulator for offline development and testing.</strong></p>
-<p align="center">Real SQL & Spark execution · Unity Catalog hierarchy · Databricks SDK compatible · Terraform compatible · MIT licensed</p>
 
 <p align="center">
-  <a href="https://github.com/dmux/minilake/releases"><img src="https://img.shields.io/github/v/release/dmux/minilake" alt="GitHub release"></a>
   <a href="https://github.com/dmux/minilake/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/dmux/minilake/ci.yml?branch=main&label=CI" alt="CI"></a>
-  <a href="https://github.com/dmux/minilake/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/dmux/minilake/release.yml?label=release" alt="Release"></a>
-  <a href="https://github.com/dmux/minilake/pkgs/container/minilake"><img src="https://img.shields.io/badge/ghcr.io-dmux%2Fminilake-blue?logo=github" alt="GHCR image"></a>
+  <a href="https://github.com/dmux/minilake/releases"><img src="https://img.shields.io/github/v/release/dmux/minilake" alt="Release"></a>
   <a href="https://github.com/dmux/minilake/blob/main/LICENSE"><img src="https://img.shields.io/github/license/dmux/minilake" alt="License"></a>
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python">
 </p>
 
-<p align="center">
-  <a href="https://dmux.github.io/minilake/"><strong>Website</strong></a> · <a href="https://github.com/dmux/minilake/blob/main/docs/index.md">Documentation</a> · <a href="https://github.com/dmux/minilake">GitHub</a> · <a href="https://github.com/dmux/minilake/pkgs/container/minilake">Container Image (GHCR)</a>
-</p>
+MiniLake is a local emulator of the Databricks REST API, for developing and testing
+`databricks-sdk`, CLI and Terraform code without a workspace.
 
----
+SQL statements run on DuckDB. EXTERNAL Delta tables are Parquet files with a `_delta_log/`,
+and writes to them go through a generated Spark job. Jobs run `spark-submit` in a sibling
+Docker container. Everything else in the API is either stored and read back, or answers
+`501 NOT_IMPLEMENTED`. It is meant for one developer on localhost, not as a shared server.
 
-**MiniLake** is a free, local Databricks API emulator — a single-developer tool for testing
-`databricks-sdk`/Terraform code against real SQL, real Delta Lake, and real Job execution,
-without paying for cloud compute.
+Website: <https://dmux.github.io/minilake/>
 
-## Quick Start
+## Run it
 
 ```bash
-# Option 1: PyPI
 pip install minilake
 minilake --port 8000
 
-# Option 2: GitHub Container Registry
+# or
 docker run -p 8000:8000 ghcr.io/dmux/minilake:latest
 
-# Option 3: Clone and build
-git clone https://github.com/dmux/minilake && cd minilake
-docker compose up -d
-
-# Verify (any option)
 curl http://localhost:8000/_minilake/health
 ```
 
-Then open **<http://localhost:8000/ui/>** for the built-in SQL workspace — an
-Athena-style query editor with a data catalog, saved queries and query history
-([details](https://github.com/dmux/minilake/blob/main/docs/ui.md)).
+The web SQL editor is at <http://localhost:8000/ui/>. Any token is accepted. The image
+downloads nothing at runtime, so it also works offline
+([details](https://github.com/dmux/minilake/blob/main/docs/getting-started.md#offline-use)).
 
-No account, no API key, no sign-up — and the container image downloads nothing at runtime:
-DuckDB's `delta` extension and the Delta / Unity Catalog Spark jars are baked in at build
-time, so it works air-gapped ([details](https://github.com/dmux/minilake/blob/main/docs/getting-started.md#offline-use)).
-
-Then point any Databricks client at it:
+## Use it
 
 ```python
 from databricks.sdk import WorkspaceClient
 
 w = WorkspaceClient(host="http://localhost:8000", token="dev")
-w.catalogs.create(name="vendas")
-```
+w.catalogs.create(name="sales")
+w.schemas.create(name="store", catalog_name="sales")
+wh = w.warehouses.create(name="dev", cluster_size="Small")
 
-More in [Getting Started](https://github.com/dmux/minilake/blob/main/docs/getting-started.md).
+def sql(statement):
+    return w.statement_execution.execute_statement(warehouse_id=wh.id, statement=statement)
+
+sql("CREATE TABLE sales.store.orders (id BIGINT, customer VARCHAR)")
+sql("INSERT INTO sales.store.orders VALUES (1, 'Ana')")
+print(sql("SELECT * FROM sales.store.orders").result.data_array)  # [[1, 'Ana']]
+```
 
 ## Documentation
 
-| | |
-|---|---|
-| [Getting Started](https://github.com/dmux/minilake/blob/main/docs/getting-started.md) | Install, first catalog and query, internal endpoints |
-| [Web UI](https://github.com/dmux/minilake/blob/main/docs/ui.md) | The built-in SQL workspace at `/ui` |
-| [Configuration](https://github.com/dmux/minilake/blob/main/docs/configuration.md) | Every environment variable, persistence, HTTPS/TLS |
-| [Databricks SDK](https://github.com/dmux/minilake/blob/main/docs/databricks-sdk.md) | Unity Catalog, warehouses, SQL and jobs from Python |
-| [Terraform & Asset Bundles](https://github.com/dmux/minilake/blob/main/docs/terraform.md) | The provider, and `bundle deploy` / `bundle run` |
-| [Spark & Delta Lake](https://github.com/dmux/minilake/blob/main/docs/spark-and-delta.md) | Real Delta files, real Spark jobs, `spark.table()` by name |
-| **[MCP Server](https://github.com/dmux/minilake/blob/main/docs/mcp/index.md)** | **67 tools for LLM agents — [examples](https://github.com/dmux/minilake/blob/main/docs/mcp/examples.md), [tool reference](https://github.com/dmux/minilake/blob/main/docs/mcp/tools.md), [troubleshooting](https://github.com/dmux/minilake/blob/main/docs/mcp/troubleshooting.md)** |
-| [Testing & development](https://github.com/dmux/minilake/blob/main/docs/testing.md) | Running the suite, adding an API group |
-| [Releases & CI/CD](https://github.com/dmux/minilake/blob/main/docs/releases.md) | How a tag becomes a published image |
-| [Feature status](https://github.com/dmux/minilake/blob/main/FEATURES.md) | Endpoint-by-endpoint status and design rationale |
-| [API coverage](https://github.com/dmux/minilake/blob/main/docs/CLI_COVERAGE.md) | Measured: every SDK endpoint probed through the real `databricks` CLI |
-| [Emulation roadmap](https://github.com/dmux/minilake/blob/main/docs/EMULATION_ROADMAP.md) | What is worth building next, with measured gap counts |
-
-## Supported Services
-
-| Service | Status | Notes |
-|---|---|---|
-| **Unity Catalog** (catalogs, schemas, tables, volumes, functions) | ✅ Real | Each catalog = its own DuckDB database (`ATTACH`), native `catalog.schema.table` addressing; a SQL function becomes a real DuckDB macro, callable by its three-part name |
-| **Unity Catalog metastore** | ✅ Real | One synthetic metastore: `current-metastore-assignment`, `metastore_summary`, list/get |
-| **EXTERNAL Delta Tables** | ✅ Real | Real Delta files; `INSERT`/`UPDATE`/`DELETE` via a generated Spark job, reads via `delta_scan()` |
-| **SQL Statement Execution** | ✅ Real | Real DuckDB; `JSON_ARRAY`/`ARROW_STREAM`/`CSV`, `INLINE`/`EXTERNAL_LINKS`; result manifest carries column types |
-| **SQL Warehouses** | ✅ Real | Full CRUD + lifecycle |
-| **Query History** | ✅ Real | `w.query_history.list()` over everything executed, failures included |
-| **Saved Queries** | ✅ Real | `w.queries.*` CRUD with `update_mask` |
-| **Alerts** | ✅ Real | `w.alerts.*` CRUD; conditions are really evaluated against query results, and back `sql_task.alert` |
-| **Web UI** | ✅ Real | Athena-style SQL workspace at `/ui` — see [Web UI](https://github.com/dmux/minilake/blob/main/docs/ui.md) |
-| **Jobs** | ✅ Real | Sibling Docker container execution (Spark) or subprocess fallback; real DAG scheduling (`depends_on`/`run_if`); `runs/submit` one-shot runs; `sql_task.file`/`.query`/`.alert` all execute for real |
-| **Workspace** | ✅ Real | File-backed notebook/script storage; raw-bytes `workspace-files` sync powers `databricks bundle deploy` / `bundle run` |
-| **DBFS & Files API** | ✅ Real | File-backed storage, chunked upload |
-| **Secrets** | ✅ Real | Real CRUD; values only resolvable inside job env vars, never via direct API (matches real Databricks). Scope ACLs are stored and read back, never enforced |
-| **Clusters** | ✅ Real state machine | CRUD + timed lifecycle transitions, `update`/`pin`/`unpin`; **no real Spark compute** (by design) |
-| **Cluster policies & instance pools** | ✅ Real CRUD | Resolve and validate against clusters; never enforced — there is no compute to constrain |
-| **Permissions** | ✅ Real CRUD | Single-user "allow-all" default (by design — see Gaps) |
-| **UC Grants** | ✅ Real CRUD | `w.grants.*` and `databricks_grants`, with real privilege **inheritance** (a catalog grant is effective on its schemas and tables); never enforced |
-| **Workspace admin** | ✅ Real CRUD | Git credentials, IP access lists, global init scripts, notification destinations, instance profiles, `workspace-conf` — stored and read back, never enforced |
-| **Legacy SQL (`preview/sql`)** | ✅ Real | Queries, alerts, dashboards, widgets, visualizations, data sources — adapters over the modern stores, so both surfaces see one object |
-| **Identity & SCIM** | ✅ Real CRUD | Current user, plus Users/Groups/ServicePrincipals CRUD, SCIM `PATCH` and filtering. Identities are records, not credentials — see Gaps |
-| **Tokens** | ✅ Real | `w.tokens.*`; the value is returned once, as in the real API — but authenticates nothing |
-| **Persistence** (`MINILAKE_PERSIST=1`) | ✅ Real | JSON snapshot on shutdown, restored on startup |
-| **Unity Catalog protocol for Spark** | ✅ Real | `spark.table("cat.sch.tbl")` resolves against minilake — see [Spark & Delta Lake](https://github.com/dmux/minilake/blob/main/docs/spark-and-delta.md#reading-by-name-with-unity-catalog) |
-| **JupyterLab + PySpark + Delta** (optional) | ✅ Real | `docker compose --profile notebook up` |
-| **MCP Server** (optional, `MINILAKE_MCP=1`) | ✅ Real | 67 tools + resources + prompts at `/mcp` — see [MCP Server](https://github.com/dmux/minilake/blob/main/docs/mcp/index.md) |
-| Repos, multi-language notebooks, DBT/pipeline tasks, DLT, Model Registry, Vector Search, Lakeview/Genie, Delta Sharing | 🚫 Not implemented | Returns `501 NOT_IMPLEMENTED`. For the measured picture, see [API coverage](https://github.com/dmux/minilake/blob/main/docs/CLI_COVERAGE.md) |
+- [Getting started](https://github.com/dmux/minilake/blob/main/docs/getting-started.md)
+- [Configuration](https://github.com/dmux/minilake/blob/main/docs/configuration.md): environment variables, persistence, TLS
+- [Databricks SDK](https://github.com/dmux/minilake/blob/main/docs/databricks-sdk.md)
+- [Terraform and Asset Bundles](https://github.com/dmux/minilake/blob/main/docs/terraform.md)
+- [Spark and Delta Lake](https://github.com/dmux/minilake/blob/main/docs/spark-and-delta.md)
+- [Web UI](https://github.com/dmux/minilake/blob/main/docs/ui.md)
+- [MCP server](https://github.com/dmux/minilake/blob/main/docs/mcp/index.md): optional, `MINILAKE_MCP=1`, for LLM agents
+- [Testing and development](https://github.com/dmux/minilake/blob/main/docs/testing.md)
+- [FEATURES.md](https://github.com/dmux/minilake/blob/main/FEATURES.md): status of every service, with design notes
+- [API coverage](https://github.com/dmux/minilake/blob/main/docs/CLI_COVERAGE.md): every SDK endpoint probed through the `databricks` CLI
+- [Emulation roadmap](https://github.com/dmux/minilake/blob/main/docs/EMULATION_ROADMAP.md)
 
 ## Known Gaps
 
-These are **deliberate**, not oversights — minilake targets one developer running it
-locally, not a shared or multi-tenant server:
+These are deliberate. MiniLake targets one developer running it locally.
 
-- **No real authentication** — any token is accepted. SCIM identities and personal access
-  tokens are records, not credentials: creating a user makes no way to sign in, and
-  revoking a token locks nobody out.
-- **No access-control enforcement** — the Permissions API is real CRUD but always allow-all,
-  so a test that passes here says nothing about grants in a real workspace.
-- **No real Spark compute for Clusters** — state machine only; real compute happens through
-  Jobs' sibling containers instead.
-- **Single process, no HA** — and DuckDB's single-writer model means concurrent load
-  contends on locks.
-- **Uneven test coverage** — `jobs.py`, `sql_statements.py` and `unity_catalog.py` are
-  covered mostly on happy paths, not edge cases.
+- **No authentication.** Any token is accepted. SCIM users and personal access tokens are
+  records, not credentials.
+- **No access control.** The Permissions and Grants APIs store and return what you give
+  them, and nothing is enforced. A test that passes here says nothing about grants in a
+  real workspace.
+- **The SQL dialect is DuckDB's**, not Spark SQL.
+- **Clusters are a state machine.** There is no Spark on them; Spark runs through Jobs.
+- **MANAGED tables are DuckDB tables with no files**, so Spark cannot see them. Use EXTERNAL
+  Delta tables when Spark has to read the data.
+- **Single process.** DuckDB is single-writer, so concurrent load serializes on a lock.
+- **Not implemented, returns 501:** Repos, DLT, Model Registry, Vector Search, Lakeview and
+  Genie, Delta Sharing, and non-Python notebook languages.
+- **Uneven test coverage.** `jobs.py`, `sql_statements.py` and `unity_catalog.py` are
+  tested mostly on the happy path.
+
+MiniLake does not reproduce every quirk of the real service. Tests here run against the
+real `databricks-sdk`, and the Terraform provider and `databricks bundle` are exercised
+end to end, but a green run locally is not a substitute for a run against Databricks.
 
 ## Contributing
 
-See [CONTRIBUTING.md](https://github.com/dmux/minilake/blob/main/CONTRIBUTING.md) for the project structure, how to add a new API
-group, and the PR checklist.
+See [CONTRIBUTING.md](https://github.com/dmux/minilake/blob/main/CONTRIBUTING.md).
 
 ## License
 
-MIT — see [LICENSE](https://github.com/dmux/minilake/blob/main/LICENSE).
+MIT. See [LICENSE](https://github.com/dmux/minilake/blob/main/LICENSE).

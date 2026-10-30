@@ -40,4 +40,5 @@ an inline `<svg><style>` applies to the whole document.
 `.nojekyll` keeps GitHub from running the files through Jekyll.
 
 Content on the page is drawn from `README.md`, `FEATURES.md` and `docs/` — when a
-feature's status changes there, update the "Coverage" table here too.
+feature's status changes there, update the "Coverage" table here too. Avoid
+hard-coding counts or the version number; nothing keeps them current.
