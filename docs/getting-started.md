@@ -110,7 +110,7 @@ result = w.statement_execution.execute_statement(
 print(result.result.data_array)   # [['Ana', '459.90']]
 ```
 
-That table is a real DuckDB table and those rows are really stored. More in
+The rows live in a DuckDB table inside the catalog's database file. More in
 [Databricks SDK](databricks-sdk.md).
 
 > `data_source_format` and `storage_location` are required positional arguments in the
