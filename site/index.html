@@ -350,6 +350,11 @@ td.desc{color:var(--text-muted)}
 /* ---------- honest ---------- */
 .honest{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
 .honest .card{background:var(--surface-2)}
+.contribs{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:34px}
+.contribs a{display:block;border-radius:50%;line-height:0;box-shadow:0 0 0 2px var(--bg),0 0 0 3px var(--line-strong);transition:transform .15s}
+.contribs a:hover{transform:translateY(-2px)}
+.contribs img{width:48px;height:48px;border-radius:50%;object-fit:cover;background:var(--surface-3)}
+.contribs-note{margin-top:14px;font-size:14.5px;color:var(--text-muted)}
 .honest .card h3{font-size:16.5px}
 
 /* ---------- cta ---------- */
@@ -951,6 +956,14 @@ MINILAKE_MCP=1 minilake --port 8000</code></pre>
       <article class="card rv"><h3>Developed on GitHub</h3><p>Source, CI, changelog and issues are public at <a href="https://github.com/dmux/minilake">dmux/minilake</a>.</p></article>
       <article class="card rv"><h3>Contributions welcome</h3><p>Report the SDK call that fails in an <a href="https://github.com/dmux/minilake/issues">issue</a>, or add an API group following <a href="https://github.com/dmux/minilake/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>.</p></article>
     </div>
+    <div class="contribs rv" aria-label="Contributors">
+      <!-- contributors:start -->
+      <a href="https://github.com/dmux" title="dmux"><img src="https://avatars.githubusercontent.com/u/2119249?s=96" alt="dmux" width="48" height="48" loading="lazy" /></a>
+      <a href="https://github.com/eddiethedean" title="eddiethedean"><img src="https://avatars.githubusercontent.com/u/41598150?s=96" alt="eddiethedean" width="48" height="48" loading="lazy" /></a>
+      <a href="https://github.com/avison9" title="avison9"><img src="https://avatars.githubusercontent.com/u/28387103?s=96" alt="avison9" width="48" height="48" loading="lazy" /></a>
+      <!-- contributors:end -->
+    </div>
+    <p class="contribs-note rv">Everyone who has committed to the project. <a href="https://github.com/dmux/minilake/graphs/contributors">See all contributors</a>.</p>
   </div>
 </section>
 
