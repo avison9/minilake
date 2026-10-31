@@ -8,7 +8,10 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "scripts/render_contributors.py"
       - ".github/workflows/pages.yml"
+  schedule:
+    - cron: "0 6 * * 1" # weekly, so the contributors list stays current
   workflow_dispatch:
 
 permissions:
@@ -30,6 +33,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Render contributors
+        run: python3 scripts/render_contributors.py ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - uses: actions/configure-pages@v5
 
