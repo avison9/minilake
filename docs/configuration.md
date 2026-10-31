@@ -13,7 +13,7 @@ Everything is set through environment variables. Nothing needs a config file.
 | `MINILAKE_DATA_DIR` | `./data` | Where catalogs, workspace files, DBFS and Delta data live |
 | `MINILAKE_VERBOSE` | unset | `1` for full `INFO` logs (per-request access logs, SQL and job traces). Off by default — only the startup banner and warnings appear |
 | `MINILAKE_SERVICES` | (all) | Comma-separated allowlist, e.g. `unity_catalog,sql_statements,sql_warehouses` |
-| `MINILAKE_DUCKDB_MEMORY_LIMIT` | `4GB` | Declared but not yet applied to any connection — currently a no-op |
+| `MINILAKE_DUCKDB_MEMORY_LIMIT` | `4GB` | DuckDB `memory_limit`, applied to every connection. Each database (the shared Unity Catalog one and each warehouse) gets its own limit. An invalid value stops startup |
 | `MINILAKE_STATEMENT_CACHE_SIZE` | `500` | How many executed statements to keep. Backs both `GET /statements/{id}` and query history; the oldest lose their rows first, then their metadata |
 | `MINILAKE_DEV_CORS` | unset | `1` allows cross-origin API access, for running the web UI's Next.js dev server on another port. Leave off otherwise — minilake has no authentication ([Web UI](ui.md#development)) |
 | `MINILAKE_DUCKDB_EXTENSION_DIR` | unset (`/opt/duckdb-extensions` in the image) | Directory of pre-installed DuckDB extensions. When set, the server only `LOAD`s the `delta` extension and never downloads it, which is what makes the image work with no internet access |
@@ -35,7 +35,7 @@ Everything is set through environment variables. Nothing needs a config file.
 | `MINILAKE_DOCKER_VOLUME` | unset | Named volume backing `MINILAKE_DATA_DIR`, shared with spawned job containers. Falls back to introspecting minilake's own mounts |
 | `MINILAKE_DOCKER_NETWORK` | unset | Network to attach job containers to, so a task can call back into the API. Falls back to introspection when minilake is on exactly one network |
 | `MINILAKE_IVY_SEED` | unset (`/opt/ivy-cache` in the image) | Pre-resolved Delta / Unity Catalog jars, copied onto the shared data volume on first job run so `spark-submit --packages` resolves without Maven Central |
-| `MINILAKE_SPARK_PREWARM` | unset | `0` skips the best-effort `docker pull` of the Spark image at startup — worth setting on a machine with no network, where the attempt only costs a timeout |
+| `MINILAKE_SPARK_PREWARM` | unset | `0` skips the best-effort `docker pull` of the Spark image at startup — worth setting on a machine with no network, where the attempt only costs a timeout. Also silences the "Docker is not reachable" warning on a machine without Docker |
 
 ### TLS
 

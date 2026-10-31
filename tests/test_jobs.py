@@ -11,8 +11,10 @@ from uuid import uuid4
 
 import pytest
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.compute import ClusterSpec
 from databricks.sdk.service.jobs import (
+    JobEmailNotifications,
     JobSettings,
     NotebookTask,
     RunIf,
@@ -115,6 +117,34 @@ def test_job_update_with_name_renames(workspace_client: WorkspaceClient):
 
 
 @pytest.mark.crud
+def test_job_partial_update_keeps_and_replaces_extra_fields(workspace_client: WorkspaceClient):
+    """Test: a setting outside the declared model (email_notifications) is kept when omitted
+    from jobs/update and replaced when sent, and the name survives both."""
+    job = workspace_client.jobs.create(
+        name="valuable name",
+        email_notifications=JobEmailNotifications(on_failure=["oncall@example.com"]),
+        tasks=[],
+    )
+
+    workspace_client.jobs.update(job_id=job.job_id, new_settings=JobSettings(tags={"team": "qa"}))
+    settings = workspace_client.jobs.get(job_id=job.job_id).settings
+    assert settings.name == "valuable name"
+    assert settings.email_notifications.on_failure == ["oncall@example.com"]
+
+    workspace_client.jobs.update(
+        job_id=job.job_id,
+        new_settings=JobSettings(email_notifications=JobEmailNotifications(on_success=["team@example.com"])),
+    )
+    settings = workspace_client.jobs.get(job_id=job.job_id).settings
+    assert settings.name == "valuable name"
+    assert settings.tags == {"team": "qa"}
+    assert settings.email_notifications.on_success == ["team@example.com"]
+    assert not settings.email_notifications.on_failure  # a sent top-level field replaces it whole
+
+    print(f"✓ Partial updates kept and replaced email_notifications of job {job.job_id}")
+
+
+@pytest.mark.crud
 def test_job_delete(workspace_client: WorkspaceClient):
     """Test: Deleting a job removes it; get then raises NOT_FOUND."""
     job = workspace_client.jobs.create(name="delete-test-job", tasks=[])
@@ -133,6 +163,53 @@ def test_job_get_nonexistent_fails(workspace_client: WorkspaceClient):
         workspace_client.jobs.get(job_id=999999999)
 
     print("✓ Nonexistent job get raises error")
+
+
+@pytest.mark.error
+def test_job_create_rejects_duplicate_task_keys(workspace_client: WorkspaceClient):
+    with pytest.raises(DatabricksError) as exc:
+        workspace_client.jobs.create(
+            name="duplicate-task-keys",
+            tasks=[Task(task_key="same"), Task(task_key="same")],
+        )
+
+    assert exc.value.error_code == "INVALID_PARAMETER_VALUE"
+    assert "not unique" in str(exc.value).lower()
+
+
+@pytest.mark.error
+def test_job_update_rejects_invalid_graph_without_changing_job(workspace_client: WorkspaceClient):
+    job = workspace_client.jobs.create(name="valid-job", tasks=[Task(task_key="original")])
+    invalid_settings = JobSettings(
+        tasks=[
+            Task(task_key="first", depends_on=[TaskDependency(task_key="second")]),
+            Task(task_key="second", depends_on=[TaskDependency(task_key="first")]),
+        ]
+    )
+
+    with pytest.raises(DatabricksError) as exc:
+        workspace_client.jobs.update(job_id=job.job_id, new_settings=invalid_settings)
+
+    assert exc.value.error_code == "INVALID_PARAMETER_VALUE"
+    assert "cycle" in str(exc.value).lower()
+    assert [task.task_key for task in workspace_client.jobs.get(job_id=job.job_id).settings.tasks] == ["original"]
+
+
+@pytest.mark.error
+def test_job_reset_rejects_unknown_dependency_without_changing_job(workspace_client: WorkspaceClient):
+    job = workspace_client.jobs.create(name="valid-job", tasks=[Task(task_key="original")])
+
+    with pytest.raises(DatabricksError) as exc:
+        workspace_client.jobs.reset(
+            job_id=job.job_id,
+            new_settings=JobSettings(
+                tasks=[Task(task_key="dependent", depends_on=[TaskDependency(task_key="missing")])]
+            ),
+        )
+
+    assert exc.value.error_code == "INVALID_PARAMETER_VALUE"
+    assert "unknown task" in str(exc.value).lower()
+    assert [task.task_key for task in workspace_client.jobs.get(job_id=job.job_id).settings.tasks] == ["original"]
 
 
 @pytest.mark.serial

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import duckdb
 
@@ -20,13 +20,22 @@ class DuckDBPool:
     - All connections are serialized with asyncio.Lock to respect DuckDB's single-writer model
     """
 
-    def __init__(self, data_dir: Path, extension_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        data_dir: Path,
+        extension_dir: Optional[Path] = None,
+        memory_limit: Optional[str] = None,
+    ):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         # Where DuckDB looks for extensions. Set by the Docker image to a directory populated
         # at build time; None for a plain pip install, where extensions are downloaded on demand.
         self.extension_dir = extension_dir if extension_dir is not None else settings.duckdb_extension_dir
+
+        # DuckDB's `memory_limit`, e.g. "4GB". It is a per-database setting, so every
+        # connection this pool opens (the shared UC one and each warehouse) gets its own cap.
+        self.memory_limit = memory_limit if memory_limit is not None else settings.duckdb_memory_limit
 
         # Shared Unity Catalog connection
         self._uc_connection: Optional[duckdb.DuckDBPyConnection] = None
@@ -40,19 +49,23 @@ class DuckDBPool:
         self._warehouse_dict_lock = asyncio.Lock()
 
     def _connect_config(self) -> dict:
-        """Connection config pinning DuckDB to the pre-installed extension directory.
+        """Config shared by every connection: the memory limit, plus the pre-installed
+        extension directory when there is one.
 
-        Empty when there is none, which leaves DuckDB on its default `$HOME/.duckdb`.
+        Without an extension directory DuckDB stays on its default `$HOME/.duckdb`.
         `autoinstall_known_extensions=False` is the part that guarantees offline operation:
         without it DuckDB silently reaches for extensions.duckdb.org the first time a query
         touches a function from an extension that isn't loaded yet.
+
+        An invalid `memory_limit` makes `duckdb.connect` raise. The UC connection is opened
+        during startup, so a bad MINILAKE_DUCKDB_MEMORY_LIMIT stops the server instead of
+        being ignored.
         """
-        if self.extension_dir is None:
-            return {}
-        return {
-            "extension_directory": str(self.extension_dir),
-            "autoinstall_known_extensions": False,
-        }
+        config: dict = {"memory_limit": self.memory_limit}
+        if self.extension_dir is not None:
+            config["extension_directory"] = str(self.extension_dir)
+            config["autoinstall_known_extensions"] = False
+        return config
 
     async def _get_uc_connection(self) -> duckdb.DuckDBPyConnection:
         """Get or create the shared Unity Catalog DuckDB connection."""
@@ -128,17 +141,41 @@ class DuckDBPool:
         async with self._uc_lock:
             conn.execute(f"ATTACH IF NOT EXISTS '{path}' AS \"{catalog_name}\"")
 
-    async def detach_catalog(self, catalog_name: str) -> None:
-        """DETACH a catalog and delete its underlying DuckDB file for real."""
+    async def detach_catalog(
+        self,
+        catalog_name: str,
+        *,
+        can_detach: Optional[Callable[[object], bool]] = None,
+    ) -> bool:
+        """Detach a catalog and delete its underlying DuckDB file.
+
+        ``can_detach`` runs while holding the UC connection lock, immediately before
+        DETACH. Callers can use it to make an emptiness check atomic with the detach.
+        It returns False without changing the catalog when the check fails.
+        """
         conn = await self.get_uc_connection()
         async with self._uc_lock:
-            try:
+            attachment = conn.execute(
+                "SELECT path FROM duckdb_databases() WHERE database_name = ?",
+                [catalog_name],
+            ).fetchone()
+            expected_path = self._catalog_db_path(catalog_name).resolve()
+            if can_detach is not None and attachment is None:
+                raise RuntimeError(f"Catalog '{catalog_name}' is not attached for emptiness inspection")
+            if attachment is not None:
+                attached_path = attachment[0]
+                if not attached_path or Path(attached_path).resolve() != expected_path:
+                    raise RuntimeError(
+                        f"Catalog '{catalog_name}' is attached to '{attached_path}', not its backing file '{expected_path}'"
+                    )
+            if can_detach is not None and not can_detach(conn):
+                return False
+            if attachment:
                 conn.execute(f'DETACH "{catalog_name}"')
-            except Exception as e:
-                logger.warning(f"Failed to detach catalog {catalog_name} (non-critical): {e}")
         path = self._catalog_db_path(catalog_name)
         path.unlink(missing_ok=True)
         Path(str(path) + ".wal").unlink(missing_ok=True)
+        return True
 
     async def get_warehouse_connection(self, warehouse_id: str) -> duckdb.DuckDBPyConnection:
         """Get or create a connection for a specific warehouse."""
@@ -188,11 +225,27 @@ class DuckDBPool:
 
         logger.info("Closed all DuckDB connections")
 
-    async def reset_all(self) -> None:
-        """Reset all warehouse connections (clear in-memory data, keep UC catalog)."""
+    async def reset_all(self, *, full: bool = False) -> None:
+        """Reset warehouse connections and optionally clear the shared UC database.
+
+        A plain state reset preserves Unity Catalog's default database. A full reset
+        closes its connection and removes both the database and its WAL so the next
+        query starts with a fresh database.
+        """
         async with self._warehouse_dict_lock:
             for conn in self._warehouse_connections.values():
                 conn.close()
             self._warehouse_connections.clear()
             self._warehouse_locks.clear()
+
+        if full:
+            async with self._uc_lock:
+                if self._uc_connection is not None:
+                    self._uc_connection.close()
+                    self._uc_connection = None
+
+                uc_path = self.data_dir / "unity_catalog.duckdb"
+                uc_path.unlink(missing_ok=True)
+                Path(str(uc_path) + ".wal").unlink(missing_ok=True)
+
         logger.info("Reset all warehouse connections")
